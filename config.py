@@ -53,13 +53,18 @@ class Config:
     # clicks. Set to "" or null to disable.
     focus_window_title: Optional[str] = "Roblox"
     # Fraction of pixels in bobber_region that must match the red/orange
-    # fish-approach trail color before we call a strike. Very small because
-    # the trail is sparse dots on mostly-dark water — 0.005 (0.5%) is a
-    # reasonable starting point.
+    # fish-approach trail color before we call a strike. Kept for backwards
+    # compatibility; splash_min is the primary signal now.
     red_trail_min: float = 0.005
+    # Fraction of pixels in bobber_region that are bright + saturated (any
+    # hue) against the dark water — the main bite signal. The cyan/teal
+    # splash in Bridger Western lights up this mask instantly. A single
+    # frame crossing 2x this value fires a strike with no debounce.
+    splash_min: float = 0.02
     # Laplacian-variance increase over the cast-time baseline at which we
     # call a strike (splash / smoke ring adds structural edges that weren't
-    # there when the water was quiet). Start loose; raise if false-triggers.
+    # there when the water was quiet). A single frame crossing 2x this fires
+    # a strike with no debounce.
     strike_edge_min: float = 25.0
 
     def to_dict(self) -> dict:
@@ -97,6 +102,7 @@ class Config:
             click_hold_ms=int(d.get("click_hold_ms", 50)),
             focus_window_title=d.get("focus_window_title", "Roblox"),
             red_trail_min=float(d.get("red_trail_min", 0.005)),
+            splash_min=float(d.get("splash_min", 0.02)),
             strike_edge_min=float(d.get("strike_edge_min", 25.0)),
         )
 

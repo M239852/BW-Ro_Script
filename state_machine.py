@@ -228,11 +228,14 @@ class FishingBot:
 
         delta = vision.frame_delta(self._baseline_bobber, curr)
         vdrop = vision.value_drop(self._baseline_bobber, curr)
-        # Strike signals: the fish leaves a red/orange ripple trail as it
-        # closes on the bobber, and a splash/smoke ring appears right at the
-        # bobber when it hits. Either is a cleaner bite signal than raw
-        # brightness delta on dark water.
-        red_frac = vision.red_trail_fraction(curr)
+        # Strike signals. The game shows a bright splash (cyan/teal in Bridger
+        # Western, but hue-agnostic) centered on the bobber when the fish
+        # bites. Two independent shape-based signals catch it:
+        #   - bright_splash_fraction: bright saturated pixels appear on the
+        #     otherwise-dark water. Reliable regardless of splash hue.
+        #   - edge_variance_delta: the splash ring adds high-frequency
+        #     structure vs the quiet cast-time baseline.
+        splash_frac = vision.bright_splash_fraction(curr)
         edge_delta = vision.edge_variance_delta(self._baseline_bobber, curr)
 
         # Heartbeat log — lets the user see the bot is alive and what values it
@@ -244,7 +247,7 @@ class FishingBot:
                 f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
                 f"delta={delta:5.1f}/{self.cfg.sink_threshold:.1f}  "
                 f"vdrop={vdrop:5.1f}  "
-                f"red={red_frac*100:4.1f}%/{self.cfg.red_trail_min*100:.1f}%  "
+                f"splash={splash_frac*100:4.1f}%/{self.cfg.splash_min*100:.1f}%  "
                 f"edgeD={edge_delta:6.1f}/{self.cfg.strike_edge_min:.1f}  "
                 f"hits={self._sink_hits}"
             )
@@ -253,17 +256,29 @@ class FishingBot:
         if since_cast < CAST_LOCKOUT_S:
             return
 
-        # A bite is confirmed when ANY of these signals cross their threshold:
-        #   - darkness/delta check (bobber yanked underwater)
-        #   - red/orange ripple trail visible in the region (fish approaching)
-        #   - splash/smoke ring has added structural edges over quiet baseline
-        strike_hit = (
+        # Strong single-frame hit: fire immediately, no debounce. The cyan
+        # splash is often only bright for 1-3 frames before dissipating, so
+        # waiting for 2 consecutive hits on a weak signal misses real bites.
+        strong_edge = edge_delta >= self.cfg.strike_edge_min * 2
+        strong_splash = splash_frac >= self.cfg.splash_min * 2
+        if strong_edge or strong_splash:
+            if self.debug:
+                tag = "EDGE" if strong_edge else "SPLASH"
+                print(
+                    f"[bot] STRIKE ({tag}, single-frame) "
+                    f"edgeD={edge_delta:.1f} splash={splash_frac*100:.2f}%"
+                )
+            self._enter(State.RETRIEVING)
+            return
+
+        # Weaker signals still use a 2-frame debounce to avoid false triggers.
+        weak_hit = (
             delta > self.cfg.sink_threshold
             or vdrop > 12
-            or red_frac >= self.cfg.red_trail_min
+            or splash_frac >= self.cfg.splash_min
             or edge_delta >= self.cfg.strike_edge_min
         )
-        if strike_hit:
+        if weak_hit:
             self._sink_hits += 1
         else:
             self._sink_hits = max(0, self._sink_hits - 1)
@@ -271,8 +286,8 @@ class FishingBot:
         if self._sink_hits >= 2:
             if self.debug:
                 print(
-                    f"[bot] STRIKE delta={delta:.1f} vdrop={vdrop:.1f} "
-                    f"red={red_frac*100:.1f}% edgeD={edge_delta:.1f}"
+                    f"[bot] STRIKE (debounced) delta={delta:.1f} vdrop={vdrop:.1f} "
+                    f"splash={splash_frac*100:.2f}% edgeD={edge_delta:.1f}"
                 )
             self._enter(State.RETRIEVING)
 

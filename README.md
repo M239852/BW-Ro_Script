@@ -103,8 +103,9 @@ Everything is in `config.json`:
 | key | meaning | default |
 |---|---|---|
 | `sink_threshold` | mean pixel delta on bobber region to call "sink" | `18.0` |
-| `red_trail_min` | fraction of red/orange pixels in the bobber region at which we call a strike. The approaching fish paints a red/orange dotted ripple line across the water; this catches the bite *before* the bobber goes under. `0.005` = 0.5% of pixels. Lower if bites are missed, raise if false-triggers. | `0.005` |
-| `strike_edge_min` | Laplacian-variance increase over the quiet-water baseline at which we call a strike. The splash / smoke ring adds structural edges that weren't there when the water was calm. | `25.0` |
+| `splash_min` | fraction of bright + saturated pixels in the bobber region at which we call a strike. Hue-agnostic — catches cyan/teal Bridger Western splashes, red/orange trails, anything colorful against dark water. A single frame crossing `splash_min * 2` fires a strike with **no** debounce so brief splashes are never missed. | `0.02` |
+| `strike_edge_min` | Laplacian-variance increase over the quiet-water baseline at which we call a strike. The splash ring adds structural edges that weren't there when the water was calm. A single frame crossing `strike_edge_min * 2` fires a strike with **no** debounce. | `25.0` |
+| `red_trail_min` | (legacy) fraction of red/orange-only pixels. Unused in detection unless your game actually uses a red trail — kept for backwards compatibility. | `0.005` |
 | `bobber_edge_min` | Laplacian edge variance below which "no bobber visible" (empty water) | `8.0` |
 | `max_recast_attempts` | consecutive cast misses before a longer RECOVER pause | `4` |
 | `win_fill` | green fraction of progress bar meaning "win" | `0.90` |

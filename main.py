@@ -184,8 +184,8 @@ def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
     print("\n=== Watch-bobber mode ===")
     print("Cast manually in-game. Every frame with high signal will be saved")
     print(f"to {out_dir}/ . Press Ctrl+C (or F6/Esc if hotkeys loaded) to stop.\n")
-    print("columns: t  delta  vdrop  edgeVar  edgeD  red%   peak")
-    print("         (red% is the fraction of red/orange trail pixels)")
+    print("columns: t  delta  vdrop  edgeVar  edgeD  splash%  mdelta")
+    print("         (splash% = fraction of bright saturated pixels, any hue)")
 
     # Build a rolling baseline from the first few frames so the user doesn't
     # have to time a separate calibration cast.
@@ -205,7 +205,7 @@ def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
     cv2.imwrite(str(out_dir / "000_baseline.png"), baseline)
 
     prev = baseline.copy()
-    peak = {"delta": 0.0, "vdrop": 0.0, "edgeD": 0.0, "red": 0.0, "mdelta": 0.0}
+    peak = {"delta": 0.0, "vdrop": 0.0, "edgeD": 0.0, "splash": 0.0, "mdelta": 0.0}
     t0 = time.perf_counter()
     dump_idx = 0
     try:
@@ -215,7 +215,7 @@ def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
             vdrop = vision.value_drop(baseline, curr)
             edge_var = vision.bobber_edge_variance(curr)
             edge_d = edge_var - base_edge
-            red = vision.red_trail_fraction(curr)
+            splash = vision.bright_splash_fraction(curr)
             # Motion: frame-to-frame delta against the previous capture.
             # This catches flickers/splashes even when vs-baseline is small.
             mdelta = vision.frame_delta(prev, curr)
@@ -224,20 +224,20 @@ def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
             peak["delta"] = max(peak["delta"], delta)
             peak["vdrop"] = max(peak["vdrop"], vdrop)
             peak["edgeD"] = max(peak["edgeD"], edge_d)
-            peak["red"] = max(peak["red"], red)
+            peak["splash"] = max(peak["splash"], splash)
             peak["mdelta"] = max(peak["mdelta"], mdelta)
 
             t = time.perf_counter() - t0
             line = (
                 f"{t:5.1f}s  d={delta:5.1f}  vd={vdrop:5.1f}  "
                 f"ev={edge_var:6.1f}  ed={edge_d:+6.1f}  "
-                f"red={red*100:5.2f}%  m={mdelta:5.1f}"
+                f"splash={splash*100:5.2f}%  m={mdelta:5.1f}"
             )
             # Highlight high-signal frames and dump them.
             high = (
                 delta > cfg.sink_threshold
                 or vdrop > 8
-                or red >= cfg.red_trail_min
+                or splash >= cfg.splash_min
                 or edge_d >= cfg.strike_edge_min
                 or mdelta > 8
             )
@@ -254,11 +254,13 @@ def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
         print("\n[watch] stopped.")
 
     print("\n=== Peak values observed ===")
-    print(f"  delta  peak = {peak['delta']:6.1f}  (threshold sink_threshold={cfg.sink_threshold:.1f})")
-    print(f"  vdrop  peak = {peak['vdrop']:6.1f}  (hard-coded 12)")
-    print(f"  edgeD  peak = {peak['edgeD']:+6.1f}  (threshold strike_edge_min={cfg.strike_edge_min:.1f})")
-    print(f"  red%   peak = {peak['red']*100:6.2f}% (threshold red_trail_min={cfg.red_trail_min*100:.2f}%)")
-    print(f"  mdelta peak = {peak['mdelta']:6.1f}")
+    print(f"  delta   peak = {peak['delta']:6.1f}  (threshold sink_threshold={cfg.sink_threshold:.1f})")
+    print(f"  vdrop   peak = {peak['vdrop']:6.1f}  (hard-coded 12)")
+    print(f"  edgeD   peak = {peak['edgeD']:+6.1f}  (threshold strike_edge_min={cfg.strike_edge_min:.1f}, "
+          f"strong={cfg.strike_edge_min*2:.1f})")
+    print(f"  splash% peak = {peak['splash']*100:6.2f}% (threshold splash_min={cfg.splash_min*100:.2f}%, "
+          f"strong={cfg.splash_min*200:.2f}%)")
+    print(f"  mdelta  peak = {peak['mdelta']:6.1f}")
     print("\nIf you watched a real bite happen, lower whichever threshold the")
     print("peak got closest to (but did not exceed). Inspect the *_mask.png")
     print("frames in debug/watch/ to verify the red-trail detector is highlighting")

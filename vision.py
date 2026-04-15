@@ -81,23 +81,33 @@ def bobber_edge_variance(img: np.ndarray) -> float:
 
 
 def red_trail_fraction(img: np.ndarray) -> float:
-    """Fraction of pixels that look like the fish-approach red/orange trail.
+    """Fraction of pixels matching the red/orange trail mask. Kept for
+    backwards compatibility; most games use bright_splash_fraction now."""
+    if img.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    warm = (((H <= 18) | (H >= 165)) & (S >= 90) & (V >= 70))
+    return float(warm.sum()) / float(warm.size)
 
-    In Bridger Western the approaching fish paints a red/orange dotted ripple
-    line across the dark water as it closes on the bobber, and leaves a
-    smoke/splash ring right at the bobber when it strikes. Both have strong
-    warm-hue saturation against the dark-teal water baseline (which has almost
-    no red), so a straight HSV red/orange mask is a very clean bite signal.
+
+def bright_splash_fraction(img: np.ndarray) -> float:
+    """Fraction of pixels that look like a bright saturated splash against
+    dark water. Hue-agnostic — catches cyan/teal Bridger Western bite splashes,
+    red/orange trails, white foam, yellow/green particles, anything.
+
+    The water baseline is nearly black-teal (very low V), so any bright
+    saturated pixel is by definition "something new" — fish splash, ripple
+    trail, particle effect, etc. This is the most reliable bite signal in
+    practice because it doesn't assume the game uses any specific color.
     """
     if img.size == 0:
         return 0.0
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    H = hsv[:, :, 0]
-    S = hsv[:, :, 1]
     V = hsv[:, :, 2]
-    # Red wraps around 0/180 in OpenCV HSV; include orange too (H ~10-25).
-    warm = (((H <= 18) | (H >= 165)) & (S >= 90) & (V >= 70))
-    return float(warm.sum()) / float(warm.size)
+    S = hsv[:, :, 1]
+    bright = (V >= 120) & (S >= 60)
+    return float(bright.sum()) / float(bright.size)
 
 
 def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
@@ -112,15 +122,16 @@ def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
 
 
 def annotate_red_mask(img: np.ndarray) -> np.ndarray:
-    """Return a BGR image with the red/orange trail mask overlaid in bright
-    magenta, so the user can visually verify what `red_trail_fraction` sees."""
+    """Return a BGR image with the bright-splash mask overlaid in bright
+    magenta, so the user can visually verify what the splash detector sees."""
     if img.size == 0:
         return img
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    warm = (((H <= 18) | (H >= 165)) & (S >= 90) & (V >= 70))
+    V = hsv[:, :, 2]
+    S = hsv[:, :, 1]
+    bright = (V >= 120) & (S >= 60)
     out = img.copy()
-    out[warm] = (255, 0, 255)  # magenta, very distinct
+    out[bright] = (255, 0, 255)  # magenta, very distinct
     return out
 
 
