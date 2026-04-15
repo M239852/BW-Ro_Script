@@ -376,14 +376,21 @@ class FishingBot:
                         f"live rest={live_rest:.2f} home={live_home} "
                         f"jitter={max_jitter}px (scores={['%.2f' % s for s in live_scores]})"
                     )
-                # Unreliable-template guard: if the live rest score is low or
-                # the location jitters more than the pos_shift threshold even
-                # in the rest state, any legitimate frame-to-frame motion
+                # Unreliable-template guard: if the live rest score is truly
+                # bad or the location jitters more than we can distinguish
+                # from a real strike, any legitimate frame-to-frame motion
                 # will look like a strike. Disable the template path so the
                 # delta-based fallback handles this cast instead.
+                #
+                # These bars are intentionally LOOSE — rest >= 0.70 and
+                # jitter <= 2*pos_shift is "good enough" because the strike
+                # decision below uses an absolute-low-score path too, not
+                # only a relative-drop-from-rest path. Rejecting the template
+                # for small rest degradation just forces everything onto the
+                # less reliable delta fallback.
                 if (
-                    live_rest < 0.85
-                    or max_jitter >= self.cfg.bobber_pos_shift
+                    live_rest < 0.70
+                    or max_jitter > self.cfg.bobber_pos_shift * 2
                 ):
                     if self.debug:
                         print(
@@ -399,6 +406,20 @@ class FishingBot:
                 self._bobber_template = None
                 self._bobber_score_rest = 0.0
         self._cast_attempts = 0
+        # Clearly announce which detector is in play for this cast. When
+        # strike timing looks wrong in --debug, the first thing to check is
+        # which path actually fired — they use different signals and have
+        # to be tuned separately.
+        if self._bobber_template is not None:
+            print(
+                f"[bot] DETECTOR=TEMPLATE  rest={self._bobber_score_rest:.2f} "
+                f"home={self._bobber_home}"
+            )
+        else:
+            print(
+                f"[bot] DETECTOR=FALLBACK  (delta sink_threshold={self.cfg.sink_threshold:.1f} "
+                f"vdrop>12)"
+            )
         self._enter(State.WAITING_SINK)
 
     # -- WAITING_SINK
@@ -469,71 +490,65 @@ class FishingBot:
         # is seeing, which is critical for tuning the strike thresholds.
         if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
             self._last_heartbeat = now
-            print(
-                f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
-                f"bobber={bscore:.2f} drop={score_drop:.2f}/{self.cfg.bobber_score_drop:.2f} "
-                f"shift={pos_shift}/{self.cfg.bobber_pos_shift}  "
-                f"wfrac={drop_frac_live*100:3.0f}%/{DROP_WINDOW_FRAC*100:.0f}% "
-                f"(n={len(self._drop_flags)})"
-            )
+            if self._bobber_template is not None and self._bobber_score_rest > 0.5:
+                print(
+                    f"[bot] waiting sink  t={self._elapsed():4.1f}s  TEMPLATE  "
+                    f"bobber={bscore:.2f}(rest={self._bobber_score_rest:.2f}) "
+                    f"drop={score_drop:.2f}/{self.cfg.bobber_score_drop:.2f} "
+                    f"shift={pos_shift}/{self.cfg.bobber_pos_shift}  "
+                    f"wfrac={drop_frac_live*100:3.0f}%/{DROP_WINDOW_FRAC*100:.0f}% "
+                    f"(n={len(self._drop_flags)})"
+                )
+            else:
+                print(
+                    f"[bot] waiting sink  t={self._elapsed():4.1f}s  FALLBACK  "
+                    f"delta={delta:.1f}/{self.cfg.sink_threshold:.1f}  "
+                    f"vdrop={vdrop:.1f}/12.0  "
+                    f"wfrac={drop_frac_live*100:3.0f}%/{DROP_WINDOW_FRAC*100:.0f}% "
+                    f"(n={len(self._drop_flags)})"
+                )
 
         since_cast = now - self._cast_t
         if since_cast < CAST_LOCKOUT_S:
             return
 
-        # === Bobber tracking is the ONLY strike signal ===
-        # The bobber itself only moves or vanishes when a fish hits. Rain,
-        # wind ripples, daytime ambient splashes, particle effects, etc. all
-        # happen around the bobber without displacing it, so the template
-        # match stays pinned to the bobber's home location at high score.
-        # Splash/edge/motion detectors were tried previously and produced
-        # too many false triggers on ambient daytime splashes — they are
-        # intentionally NOT used to fire strikes here.
-        if self._bobber_template is None or self._bobber_score_rest <= 0.5:
-            # Template couldn't be built at cast-settle; we have no reliable
-            # signal. Fall back to the old delta/vdrop detection so the bot
-            # isn't stuck forever — this path is a degraded last resort.
-            fb_dropped = delta > self.cfg.sink_threshold or vdrop > 12
-            if fb_dropped:
-                if self._drop_start_t == 0.0:
-                    self._drop_start_t = now
-                if (now - self._drop_start_t) * 1000.0 >= self.cfg.bobber_lost_ms:
-                    if self.debug:
-                        print(
-                            f"[bot] STRIKE (FALLBACK) delta={delta:.1f} "
-                            f"vdrop={vdrop:.1f}  (no bobber template)"
-                        )
-                        self._dump_strike_history("FALLBACK")
-                    self._enter(State.RETRIEVING)
-            else:
-                self._drop_start_t = 0.0
-            return
+        # === Unified rolling-window strike detector ===
+        # Regardless of which path (template vs fallback) is active, we
+        # classify the current frame as "dropped" or "not dropped" and
+        # push the bool into self._drop_flags. Strike fires when >=80% of
+        # the last bobber_lost_ms frames are dropped. Single rolling-window
+        # mechanism, single set of tunables.
+        #
+        # Template path:
+        #   dropped_now = (bscore is very low OR score_drop from rest is
+        #                  big) AND the best-match location has shifted.
+        #   The AND between a score signal and a position signal is the
+        #   critical guard against rain/ambient splashes. A rain drop
+        #   might jitter the score OR the position individually but almost
+        #   never both at once; a real bite craters both because the
+        #   template is no longer findable at all.
+        #
+        #   We allow EITHER "absolute score low" (bscore < 0.55) OR
+        #   "relative drop from rest" (>= bobber_score_drop) as the score
+        #   signal so a slightly degraded rest score doesn't starve the
+        #   detector. A real bite drives bscore down to <0.3 regardless
+        #   of what rest was, so absolute-low is the more robust signal.
+        #
+        # Fallback path (no template):
+        #   dropped_now = delta or vdrop exceed their thresholds.
+        #   The rolling-window fraction still gives rain-resistance here
+        #   because isolated noise frames don't fill the window.
+        if self._bobber_template is not None and self._bobber_score_rest > 0.5:
+            abs_low = bscore < 0.55
+            rel_drop = score_drop >= self.cfg.bobber_score_drop
+            score_bad = abs_low or rel_drop
+            pos_bad = pos_shift >= self.cfg.bobber_pos_shift
+            dropped_now = score_bad and pos_bad
+            path = "TEMPLATE"
+        else:
+            dropped_now = delta > self.cfg.sink_threshold or vdrop > 12
+            path = "FALLBACK"
 
-        # Rolling-window strike detector. A frame is "dropped" only if BOTH
-        # the template score has cratered AND the best-match location has
-        # shifted away from home. Using AND (not OR) is the critical guard
-        # against weather noise:
-        #
-        #   * Rain drop hits the water near the bobber -> might jitter the
-        #     match score a little, might jitter the best-match pixel
-        #     location a little, but almost never both at once on the same
-        #     frame. AND rejects these.
-        #   * Real fish bite pulls the bobber straight underwater -> the
-        #     template is no longer findable at all, so cv2.matchTemplate
-        #     falls back to the best random-noise match somewhere in the
-        #     region. That gives low score AND shifted location at the
-        #     same time, and it stays that way for seconds.
-        #
-        # We then require that a high fraction (DROP_WINDOW_FRAC) of the
-        # last bobber_lost_ms milliseconds of frames were dropped. Rain
-        # produces isolated dropped frames scattered among clean frames,
-        # so the fraction stays well below threshold. A bite produces an
-        # unbroken run of dropped frames, so the fraction hits ~1.0 within
-        # one window.
-        dropped_now = (
-            score_drop >= self.cfg.bobber_score_drop
-            and pos_shift >= self.cfg.bobber_pos_shift
-        )
         self._drop_flags.append((now, dropped_now))
 
         drop_count = sum(1 for (_, d) in self._drop_flags if d)
@@ -548,14 +563,21 @@ class FishingBot:
             and window_span_ms >= self.cfg.bobber_lost_ms * 0.8
             and drop_frac >= DROP_WINDOW_FRAC
         ):
-            reason = "BOBBER_LOST"
+            reason = f"{path}_LOST"
             if self.debug:
-                print(
-                    f"[bot] STRIKE ({reason}) score={bscore:.2f} "
-                    f"drop={score_drop:.2f} shift={pos_shift} "
-                    f"wfrac={drop_frac*100:.0f}% over {window_span_ms:.0f}ms "
-                    f"(n={len(self._drop_flags)})"
-                )
+                if path == "TEMPLATE":
+                    print(
+                        f"[bot] STRIKE ({reason}) score={bscore:.2f} "
+                        f"drop={score_drop:.2f} shift={pos_shift} "
+                        f"wfrac={drop_frac*100:.0f}% over {window_span_ms:.0f}ms "
+                        f"(n={len(self._drop_flags)})"
+                    )
+                else:
+                    print(
+                        f"[bot] STRIKE ({reason}) delta={delta:.1f} "
+                        f"vdrop={vdrop:.1f}  wfrac={drop_frac*100:.0f}% "
+                        f"over {window_span_ms:.0f}ms (n={len(self._drop_flags)})"
+                    )
                 self._dump_strike_history(reason)
             self._enter(State.RETRIEVING)
 
