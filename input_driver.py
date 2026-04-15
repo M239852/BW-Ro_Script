@@ -27,6 +27,80 @@ except ImportError:
     _HAS_PDI = False
 
 
+def _get_foreground_hwnd() -> int:
+    """Return the HWND of the currently foreground window, or 0."""
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
+def _window_title(hwnd: int) -> str:
+    if sys.platform != "win32" or not hwnd:
+        return ""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value
+    except Exception:
+        return ""
+
+
+def _focus_hwnd(hwnd: int, debug: bool = False) -> bool:
+    """Force-focus a specific HWND. Returns True iff focus was (re)applied.
+
+    Uses the AttachThreadInput trick to bypass Windows' SetForegroundWindow
+    restrictions (you can't normally steal focus from another process unless
+    your process was recently foreground). Attaching the calling thread to
+    the current foreground thread's input queue lets SetForegroundWindow
+    succeed regardless.
+    """
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        if not user32.IsWindow(hwnd):
+            if debug:
+                print(f"[input] stored HWND {hwnd} is no longer a valid window")
+            return False
+        # Fast-path: already focused. Don't thrash the input queue.
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+        if debug:
+            print(f"[input] refocusing HWND {hwnd} ({_window_title(hwnd)!r})")
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        fg = user32.GetForegroundWindow()
+        cur_tid = kernel32.GetCurrentThreadId()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = False
+        if fg_tid and fg_tid != cur_tid:
+            attached = bool(user32.AttachThreadInput(cur_tid, fg_tid, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            ok = bool(user32.SetForegroundWindow(hwnd))
+            user32.SetFocus(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(cur_tid, fg_tid, False)
+        if not ok and debug:
+            print("[input] SetForegroundWindow refused even with AttachThreadInput")
+        return ok
+    except Exception as e:
+        if debug:
+            print(f"[input] focus hwnd failed: {e}")
+        return False
+
+
 def _focus_window_by_title(title: str, debug: bool = False) -> bool:
     """Best-effort bring a window to the foreground by **strict** title match.
 
@@ -142,6 +216,12 @@ class Input:
         self.hold_ms = hold_ms
         self.click_hold_ms = click_hold_ms
         self._held: Optional[str] = None
+        # Pinned game HWND. If set (via capture_game_window), focus_game will
+        # always refocus this exact handle instead of searching by title.
+        # This is the bulletproof path: the user alt-tabs into Roblox during
+        # the startup countdown, we snapshot the foreground window, and then
+        # we can't possibly focus the wrong one.
+        self._game_hwnd: int = 0
         if not dry_run and not _HAS_PDI:
             raise RuntimeError(
                 "pydirectinput is required for live input. "
@@ -188,6 +268,20 @@ class Input:
         pydirectinput.mouseDown(button="left")
         time.sleep(self.click_hold_ms / 1000.0)
         pydirectinput.mouseUp(button="left")
+        # Post-click focus sanity check. If a click lands outside the game
+        # window, Windows switches focus to whatever was clicked — that's
+        # how the "tabs out mid-run" bug manifests. Detect it here so the
+        # user knows cast_point is the problem (not title matching).
+        if sys.platform == "win32" and self._game_hwnd:
+            try:
+                import ctypes
+                fg = ctypes.windll.user32.GetForegroundWindow()
+                if fg != self._game_hwnd:
+                    print(f"[input] WARN click stole focus from game "
+                          f"(fg={_window_title(fg)!r}). cast_point/retrieve_point "
+                          "is likely outside the Roblox window — recalibrate.")
+            except Exception:
+                pass
 
     def cast(self, cast_point: Optional[tuple], cast_key: str) -> None:
         """Cast the rod: click the configured point if present, else press cast_key."""
@@ -198,18 +292,57 @@ class Input:
                 print(f"[input] cast -> press '{cast_key}'")
             self.press(cast_key)
 
-    def focus_game(self, title: Optional[str], debug: bool = False) -> bool:
-        """Best-effort force-focus the game window before sending input.
+    def capture_game_window(self, countdown: int = 4, debug: bool = False) -> bool:
+        """Prompt the user to alt-tab into Roblox, then pin whatever window is
+        in the foreground when the countdown ends. All subsequent focus calls
+        refocus that exact HWND, so we can never accidentally pull a
+        PowerShell / VS Code / browser window forward instead.
 
-        Returns True if focus was changed. Silently returns False if title
-        is falsy, if we're in dry-run, or if no matching window was found.
+        Returns True if a non-zero HWND was captured.
         """
-        if self.dry_run or not title:
+        if self.dry_run:
+            return False
+        if sys.platform != "win32":
+            return False
+        print(f"\n[input] Switch to Roblox NOW. Capturing focused window in {countdown}s...")
+        for i in range(countdown, 0, -1):
+            print(f"  {i}...")
+            time.sleep(1)
+        hwnd = _get_foreground_hwnd()
+        if not hwnd:
+            print("[input] WARN could not read foreground window; falling back to title match")
+            return False
+        title = _window_title(hwnd)
+        self._game_hwnd = hwnd
+        print(f"[input] pinned game window: HWND={hwnd} title={title!r}")
+        if "roblox" not in title.lower() and title:
+            print("[input] WARN captured window title does not contain 'Roblox'. "
+                  "If that's wrong, stop (F6/Esc) and re-run.")
+        return True
+
+    def focus_game(self, title: Optional[str], debug: bool = False) -> bool:
+        """Force-focus the game window before sending input.
+
+        Preferred path: if a game HWND was captured via capture_game_window(),
+        refocus that exact handle. Otherwise fall back to strict title match.
+        Returns True if focus was (re)applied.
+        """
+        if self.dry_run:
+            return False
+        # Preferred: pinned HWND path.
+        if self._game_hwnd:
+            ok = _focus_hwnd(self._game_hwnd, debug=debug)
+            if ok:
+                return True
+            # HWND went stale (game closed / relaunched). Fall through to
+            # title match as a recovery, and forget the dead handle.
+            if debug:
+                print("[input] pinned HWND stale; retrying by title")
+            self._game_hwnd = 0
+        if not title:
             return False
         ok = _focus_window_by_title(title, debug=debug)
         if not ok:
-            # One retry after a short pause — Windows sometimes rejects the
-            # first SetForegroundWindow if another process recently used it.
             time.sleep(0.05)
             ok = _focus_window_by_title(title, debug=debug)
         if not ok:

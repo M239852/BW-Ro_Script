@@ -163,10 +163,7 @@ def _test_input_mode(cfg: Config, inp: Input) -> None:
     detection, no minigame. Use this to prove that the click/focus/coords
     path actually delivers input to the game."""
     print("\n=== Input test mode ===")
-    print("Switch to Roblox NOW. Starting in 4 seconds...")
-    for i in range(4, 0, -1):
-        print(f"  {i}...")
-        time.sleep(1)
+    inp.capture_game_window(countdown=4, debug=True)
 
     rp = cfg.retrieve_point if cfg.retrieve_point is not None else cfg.cast_point
     rk = cfg.retrieve_key if cfg.retrieve_key is not None else cfg.cast_key
@@ -242,6 +239,12 @@ def main() -> int:
         return 0
 
     bot = FishingBot(cfg=cfg, inp=inp, screen=screen, debug=args.debug)
+
+    # Pin the Roblox window now, before the loop starts. User alt-tabs into
+    # Roblox during the countdown; whatever is in the foreground at the end
+    # is the exact HWND every cast/retrieve will refocus. This avoids any
+    # title-match ambiguity (folder names, browser tabs, etc).
+    inp.capture_game_window(countdown=4, debug=args.debug)
 
     _install_hotkeys(bot.stop)
 
