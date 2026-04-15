@@ -147,6 +147,30 @@ It fires cast → wait 3 s → retrieve three times with no sink detection. Watc
 
 If strikes are being missed: first check that `bobber_region` is wide enough to contain the approaching trail (see the calibration note above), then lower `red_trail_min` to e.g. `0.003` or `strike_edge_min` to `15.0`.
 
+### When strikes are still being missed — use `--watch-bobber`
+
+If the heartbeat numbers don't tell you enough, run:
+
+```
+python main.py --watch-bobber
+```
+
+This takes no action — no clicks, no state machine — and instead continuously captures `bobber_region`, prints every signal (`delta`, `vdrop`, `edgeVar`, `edgeD`, `red%`, frame-to-frame `mdelta`), and saves any **high-signal frame** to `debug/watch/` as two PNGs per dump:
+
+- `NNNN_curr.png` — the raw captured bobber region
+- `NNNN_mask.png` — same frame with every red/orange trail pixel painted **bright magenta**, so you can verify the detector is highlighting the actual ripple trail and not just noise
+
+Workflow:
+
+1. Run `python main.py --watch-bobber`, leave it running
+2. Cast manually in-game
+3. Wait for a real bite, watch it happen
+4. Ctrl+C to stop. The final "Peak values observed" block tells you exactly which signal got how close to threshold during your session
+5. Lower the threshold of whichever signal's peak *got closest to* but *did not exceed* its target
+6. Open `debug/watch/*_mask.png` — if your real ripple trail is **not** turning magenta in any frame, the HSV mask bounds are off for your game's trail color (open the underlying `_curr.png`, pick a trail-dot pixel in any image editor, check its HSV, and widen the `warm` mask in `vision.red_trail_fraction`)
+
+This is the fastest way to close the loop when nothing else is working — you see *exactly* what the bot sees.
+
 ## File layout
 
 ```

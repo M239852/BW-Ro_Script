@@ -111,6 +111,19 @@ def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
     return bobber_edge_variance(curr) - bobber_edge_variance(baseline)
 
 
+def annotate_red_mask(img: np.ndarray) -> np.ndarray:
+    """Return a BGR image with the red/orange trail mask overlaid in bright
+    magenta, so the user can visually verify what `red_trail_fraction` sees."""
+    if img.size == 0:
+        return img
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    warm = (((H <= 18) | (H >= 165)) & (S >= 90) & (V >= 70))
+    out = img.copy()
+    out[warm] = (255, 0, 255)  # magenta, very distinct
+    return out
+
+
 # --- progress bar ----------------------------------------------------------
 
 ProgressState = Literal["filling", "win", "fail", "unknown"]

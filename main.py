@@ -158,6 +158,113 @@ def _list_windows_mode() -> None:
     )
 
 
+def _watch_bobber_mode(cfg: Config, screen: Screen) -> None:
+    """Continuously capture the bobber region and print every strike signal
+    plus save annotated frames. No input is sent, no state machine runs.
+
+    Workflow: run this, cast manually in-game, wait for a bite, watch the
+    numbers scroll on-screen, and inspect debug/watch/*.png afterward to see
+    exactly which pixels the red-trail detector picked up. If a real bite
+    happened but no number ever crossed its threshold, the one that got
+    closest is the one to lower in config.json.
+    """
+    import numpy as np
+    import cv2
+    import vision
+
+    out_dir = Path("debug/watch")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe old frames so it's easier to scan the relevant ones.
+    for old in out_dir.glob("*.png"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    print("\n=== Watch-bobber mode ===")
+    print("Cast manually in-game. Every frame with high signal will be saved")
+    print(f"to {out_dir}/ . Press Ctrl+C (or F6/Esc if hotkeys loaded) to stop.\n")
+    print("columns: t  delta  vdrop  edgeVar  edgeD  red%   peak")
+    print("         (red% is the fraction of red/orange trail pixels)")
+
+    # Build a rolling baseline from the first few frames so the user doesn't
+    # have to time a separate calibration cast.
+    warmup = []
+    for _ in range(8):
+        try:
+            warmup.append(screen.grab(cfg.bobber_region))
+        except Exception:
+            pass
+        time.sleep(0.1)
+    if not warmup:
+        print("[watch] failed to grab bobber_region — is it calibrated?")
+        return
+    baseline = np.mean(np.stack(warmup).astype(np.float32), axis=0).astype(np.uint8)
+    base_edge = vision.bobber_edge_variance(baseline)
+    print(f"[watch] baseline edge var={base_edge:.1f}  shape={baseline.shape}")
+    cv2.imwrite(str(out_dir / "000_baseline.png"), baseline)
+
+    prev = baseline.copy()
+    peak = {"delta": 0.0, "vdrop": 0.0, "edgeD": 0.0, "red": 0.0, "mdelta": 0.0}
+    t0 = time.perf_counter()
+    dump_idx = 0
+    try:
+        while True:
+            curr = screen.grab(cfg.bobber_region)
+            delta = vision.frame_delta(baseline, curr)
+            vdrop = vision.value_drop(baseline, curr)
+            edge_var = vision.bobber_edge_variance(curr)
+            edge_d = edge_var - base_edge
+            red = vision.red_trail_fraction(curr)
+            # Motion: frame-to-frame delta against the previous capture.
+            # This catches flickers/splashes even when vs-baseline is small.
+            mdelta = vision.frame_delta(prev, curr)
+            prev = curr
+
+            peak["delta"] = max(peak["delta"], delta)
+            peak["vdrop"] = max(peak["vdrop"], vdrop)
+            peak["edgeD"] = max(peak["edgeD"], edge_d)
+            peak["red"] = max(peak["red"], red)
+            peak["mdelta"] = max(peak["mdelta"], mdelta)
+
+            t = time.perf_counter() - t0
+            line = (
+                f"{t:5.1f}s  d={delta:5.1f}  vd={vdrop:5.1f}  "
+                f"ev={edge_var:6.1f}  ed={edge_d:+6.1f}  "
+                f"red={red*100:5.2f}%  m={mdelta:5.1f}"
+            )
+            # Highlight high-signal frames and dump them.
+            high = (
+                delta > cfg.sink_threshold
+                or vdrop > 8
+                or red >= cfg.red_trail_min
+                or edge_d >= cfg.strike_edge_min
+                or mdelta > 8
+            )
+            if high:
+                dump_idx += 1
+                annotated = vision.annotate_red_mask(curr)
+                cv2.imwrite(str(out_dir / f"{dump_idx:04d}_curr.png"), curr)
+                cv2.imwrite(str(out_dir / f"{dump_idx:04d}_mask.png"), annotated)
+                print(line + "  *DUMPED*")
+            else:
+                print(line)
+            time.sleep(0.08)
+    except KeyboardInterrupt:
+        print("\n[watch] stopped.")
+
+    print("\n=== Peak values observed ===")
+    print(f"  delta  peak = {peak['delta']:6.1f}  (threshold sink_threshold={cfg.sink_threshold:.1f})")
+    print(f"  vdrop  peak = {peak['vdrop']:6.1f}  (hard-coded 12)")
+    print(f"  edgeD  peak = {peak['edgeD']:+6.1f}  (threshold strike_edge_min={cfg.strike_edge_min:.1f})")
+    print(f"  red%   peak = {peak['red']*100:6.2f}% (threshold red_trail_min={cfg.red_trail_min*100:.2f}%)")
+    print(f"  mdelta peak = {peak['mdelta']:6.1f}")
+    print("\nIf you watched a real bite happen, lower whichever threshold the")
+    print("peak got closest to (but did not exceed). Inspect the *_mask.png")
+    print("frames in debug/watch/ to verify the red-trail detector is highlighting")
+    print("the actual approaching trail and not just noise.")
+
+
 def _test_input_mode(cfg: Config, inp: Input) -> None:
     """Diagnostic: fire cast -> pause -> retrieve three times, no sink
     detection, no minigame. Use this to prove that the click/focus/coords
@@ -204,6 +311,11 @@ def parse_args() -> argparse.Namespace:
                    help="Diagnostic: fire cast/retrieve a few times with no sink detection")
     p.add_argument("--list-windows", action="store_true",
                    help="Diagnostic: list all visible window titles + process names and exit")
+    p.add_argument("--watch-bobber", action="store_true",
+                   help="Diagnostic: live-print strike signals and dump annotated "
+                        "bobber-region frames to debug/watch/. Cast manually in-game, "
+                        "wait for a bite, then inspect the numbers and the frames to "
+                        "see what the bot actually saw.")
     return p.parse_args()
 
 
@@ -224,6 +336,11 @@ def main() -> int:
 
     if args.capture_templates:
         _capture_templates_mode(cfg, screen)
+        screen.close()
+        return 0
+
+    if args.watch_bobber:
+        _watch_bobber_mode(cfg, screen)
         screen.close()
         return 0
 
