@@ -320,19 +320,80 @@ class FishingBot:
         tail = frames[-3:] if len(frames) >= 3 else frames
         self._baseline_bobber = np.mean(np.stack(tail).astype(np.float32), axis=0).astype(np.uint8)
         # Build the bobber tracking template from the center of the baseline
-        # and snapshot its rest-state score/position. During WAITING_SINK we
-        # will look for sharp drops in score or shifts in position as the
-        # weather-resistant bite signal.
+        # and then measure its REST STATE against a sequence of fresh LIVE
+        # frames — not against the baseline it was cut from. Matching the
+        # template against its own source is a tautology: it will always
+        # return ~1.0 regardless of whether the template actually tracks a
+        # real bobber in moving water. The baseline-tautology rest score
+        # then pretends "drop = 0" in the rest state when in reality the
+        # live match score oscillates much lower than 1.0, and every live
+        # frame in WAITING_SINK looks like a "drop" vs that phantom rest.
+        #
+        # Instead we:
+        #   1. Extract the template from the baseline
+        #   2. Capture N fresh live frames after a short pause
+        #   3. Run matchTemplate on each live frame
+        #   4. Use the *median* of those live scores as the real rest score
+        #      and the median location as the real home position
+        #   5. If the live rest score is too low OR the location is jittering
+        #      by more than a pixel or two even without a bite, the template
+        #      is unreliable — disable the template path entirely for this
+        #      cast and fall through to the delta-based fallback detector.
         self._bobber_template = vision.extract_bobber_template(self._baseline_bobber)
         if self._bobber_template is not None:
-            score, loc = vision.track_bobber(self._baseline_bobber, self._bobber_template)
-            self._bobber_home = loc
-            self._bobber_score_rest = score
-            if self.debug:
-                print(
-                    f"[bot] bobber template {self._bobber_template.shape} "
-                    f"rest score={score:.2f} home={loc}"
+            live_scores: list[float] = []
+            live_locs: list[tuple[int, int]] = []
+            for _ in range(5):
+                if not self._interruptible_sleep(0.08):
+                    return
+                try:
+                    live_frame = self.screen.grab(self.cfg.bobber_region)
+                except Exception:
+                    continue
+                s, loc = vision.track_bobber(live_frame, self._bobber_template)
+                live_scores.append(s)
+                live_locs.append(loc)
+
+            if len(live_scores) >= 3:
+                ss = sorted(live_scores)
+                live_rest = ss[len(ss) // 2]
+                xs = sorted(l[0] for l in live_locs)
+                ys = sorted(l[1] for l in live_locs)
+                live_home = (xs[len(xs) // 2], ys[len(ys) // 2])
+                max_jitter = max(
+                    abs(l[0] - live_home[0]) + abs(l[1] - live_home[1])
+                    for l in live_locs
                 )
+                self._bobber_score_rest = live_rest
+                self._bobber_home = live_home
+                if self.debug:
+                    print(
+                        f"[bot] bobber template {self._bobber_template.shape} "
+                        f"live rest={live_rest:.2f} home={live_home} "
+                        f"jitter={max_jitter}px (scores={['%.2f' % s for s in live_scores]})"
+                    )
+                # Unreliable-template guard: if the live rest score is low or
+                # the location jitters more than the pos_shift threshold even
+                # in the rest state, any legitimate frame-to-frame motion
+                # will look like a strike. Disable the template path so the
+                # delta-based fallback handles this cast instead.
+                if (
+                    live_rest < 0.85
+                    or max_jitter >= self.cfg.bobber_pos_shift
+                ):
+                    if self.debug:
+                        print(
+                            f"[bot] template UNRELIABLE (rest={live_rest:.2f} "
+                            f"jitter={max_jitter}) — disabling template path "
+                            "for this cast, using fallback delta detector"
+                        )
+                    self._bobber_template = None
+                    self._bobber_score_rest = 0.0
+            else:
+                if self.debug:
+                    print("[bot] not enough live rest samples; disabling template path")
+                self._bobber_template = None
+                self._bobber_score_rest = 0.0
         self._cast_attempts = 0
         self._enter(State.WAITING_SINK)
 
