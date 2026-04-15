@@ -60,8 +60,12 @@ SETTLE_MIN_S = 0.8
 SETTLE_MAX_S = 6.0
 # Heartbeat interval for WAITING_SINK debug log.
 HEARTBEAT_S = 3.0
-# After retrieve click, how long to wait for the minigame UI to pop.
-RETRIEVE_WAIT_S = 0.5
+# After retrieve click, how long to poll the letter region waiting for
+# a minigame prompt to appear. If no letter is recognized within this
+# window, we assume the catch was not a minigame (Bridger Western only
+# triggers the minigame occasionally) and recast.
+MINIGAME_DETECT_S = 3.0
+MINIGAME_DETECT_POLL_S = 0.1
 
 
 class FishingBot:
@@ -563,16 +567,49 @@ class FishingBot:
 
         A reaction delay (retrieve_delay_ms) is applied *before* the click so
         the fish has time to fully commit to the bobber. Clicking too fast on
-        the first dip frame causes the fish to slip the hook."""
+        the first dip frame causes the fish to slip the hook.
+
+        After the retrieve click we poll the letter region for up to
+        MINIGAME_DETECT_S seconds. If a letter prompt shows up we enter
+        MINIGAME; if it never does we assume this catch was not a minigame
+        (Bridger Western only triggers the minigame occasionally) and
+        recast directly.
+        """
         delay_s = max(0.0, self.cfg.retrieve_delay_ms / 1000.0)
         if self.debug:
             print(f"[bot] retrieving: wait {delay_s*1000:.0f} ms then hook")
         if not self._interruptible_sleep(delay_s):
             return
         self._retrieve_action()
-        # Give the minigame UI a moment to appear.
-        self._interruptible_sleep(RETRIEVE_WAIT_S)
-        self._enter(State.MINIGAME)
+
+        deadline = time.perf_counter() + MINIGAME_DETECT_S
+        while time.perf_counter() < deadline:
+            if self._stop.is_set():
+                return
+            try:
+                letter_img = self.screen.grab(self.cfg.letter_region)
+            except Exception as e:
+                if self.debug:
+                    print(f"[bot] letter grab failed: {e}")
+                time.sleep(MINIGAME_DETECT_POLL_S)
+                continue
+            letter, score, _ = vision.recognize_letter(letter_img, self.templates)
+            if letter is not None:
+                if self.debug:
+                    print(
+                        f"[bot] minigame prompt detected letter={letter} "
+                        f"score={score:.2f} -> MINIGAME"
+                    )
+                self._enter(State.MINIGAME)
+                return
+            time.sleep(MINIGAME_DETECT_POLL_S)
+
+        if self.debug:
+            print(
+                f"[bot] no minigame prompt in {MINIGAME_DETECT_S:.1f}s — "
+                "plain catch, recasting"
+            )
+        self._enter(State.CASTING)
 
     # -- MINIGAME
     def _handle_minigame(self) -> None:
