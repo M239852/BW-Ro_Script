@@ -113,7 +113,7 @@ Everything is in `config.json`:
 | `hold_ms` | keydown hold time in ms | `60` |
 | `cast_key` / `chest_key` | key names passed to pydirectinput | `1` / `e` |
 | `retrieve_point` / `retrieve_key` | optional — action to "hook" the fish when bobber sinks. Defaults to the cast action (same button casts and hooks in most Roblox fishing games). | `null` |
-| `retrieve_delay_ms` | wait after detecting the bobber sink before firing the retrieve click, so the fish has time to fully commit to the bobber. Raise if fish keep slipping the hook, lower if you're watching prompts time out. Typical working range 250–600. | `350` |
+| `retrieve_delay_ms` | wait after detecting a strike before firing the retrieve click. With splash-based detection the strike fires at peak bite time, so this should be small. **Raise toward 150–250 only if fish are actually slipping the hook** (you see a strike detect + click but no chest). | `60` |
 | `click_hold_ms` | mouse-button hold time for cast/retrieve clicks. Roblox drops very short clicks — 40–80 ms is reliable. | `50` |
 | `focus_window_title` | substring of the game window title to force-focus before each cast/retrieve so mis-focused clicks don't vanish. Set to `""` to disable. | `"Roblox"` |
 
@@ -147,6 +147,16 @@ It fires cast → wait 3 s → retrieve three times with no sink detection. Watc
 - A `STRIKE` line tells you which signal fired. If you watched a real bite happen but none of the four values crossed its threshold, lower the one that got closest. If the bot false-triggers in calm water, raise the one that crossed.
 
 If strikes are being missed: first check that `bobber_region` is wide enough to contain the approaching trail (see the calibration note above), then lower `red_trail_min` to e.g. `0.003` or `strike_edge_min` to `15.0`.
+
+### Strike replay dumps (live bot, `--debug`)
+
+When running `python main.py --debug`, **every** strike fire dumps the last ~1.5 s of bobber-region frames to `debug/strikes/strike_NNN_<reason>/`. Each dump contains:
+
+- `NN_tXXXXms.png` — the raw captured frame at time X ms before fire
+- `NN_tXXXXms_mask.png` — same frame with the bright-splash mask painted magenta
+- `signals.txt` — tabular log of every signal at every frame in the window
+
+This is the definitive ground-truth for "is the bot firing at the right time?". Flip through the frames in timestamp order and find which one has the splash. If the fire happened *before* that frame → lower `retrieve_delay_ms` or the strong thresholds (firing on noise, not splash). If *after* → your splash is too transient and we need to widen the detection window or pre-fire on motion.
 
 ### When strikes are still being missed — use `--watch-bobber`
 

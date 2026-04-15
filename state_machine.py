@@ -77,9 +77,15 @@ class FishingBot:
         # Persistent across state transitions — counts consecutive "no bobber
         # after cast" failures so we can back off after repeated misses.
         self._cast_attempts: int = 0
+        # Rolling buffer of (timestamp, frame, signals) during WAITING_SINK.
+        # On strike fire we dump the tail so you can see exactly what the
+        # bot was reacting to — this is the only way to debug "wrong timing".
+        self._strike_history: list = []
+        self._strike_dump_idx: int = 0
 
         if debug:
             Path("debug").mkdir(exist_ok=True)
+            Path("debug/strikes").mkdir(exist_ok=True)
 
     # -------- public --------
 
@@ -111,6 +117,8 @@ class FishingBot:
         self._last_letter = None
         self._last_letter_t = 0.0
         self._last_green_frac = 0.0
+        if new_state == State.WAITING_SINK:
+            self._strike_history = []
 
     def _elapsed(self) -> float:
         return time.perf_counter() - self._state_t
@@ -137,6 +145,34 @@ class FishingBot:
                 return False
             time.sleep(min(0.05, end - time.perf_counter()))
         return True
+
+    def _dump_strike_history(self, reason: str) -> None:
+        """Save the last ~1 second of bobber-region frames leading up to a
+        strike fire, plus the annotated mask for each. Lets the user see
+        exactly what triggered the strike and whether the timing was right."""
+        if not self.debug or not self._strike_history:
+            return
+        self._strike_dump_idx += 1
+        tag = f"strike_{self._strike_dump_idx:03d}_{reason}"
+        out = Path("debug/strikes") / tag
+        out.mkdir(parents=True, exist_ok=True)
+        for i, (t_rel, frame, sig) in enumerate(self._strike_history):
+            cv2.imwrite(str(out / f"{i:02d}_t{int(t_rel*1000):04d}ms.png"), frame)
+            cv2.imwrite(
+                str(out / f"{i:02d}_t{int(t_rel*1000):04d}ms_mask.png"),
+                vision.annotate_red_mask(frame),
+            )
+        with open(out / "signals.txt", "w") as f:
+            f.write(f"reason: {reason}\n")
+            f.write("i  t_ms  delta  vdrop  edgeD  splash%  mdelta\n")
+            for i, (t_rel, _, sig) in enumerate(self._strike_history):
+                f.write(
+                    f"{i:2d}  {int(t_rel*1000):5d}  "
+                    f"{sig['delta']:5.1f}  {sig['vdrop']:5.1f}  "
+                    f"{sig['edgeD']:+6.1f}  {sig['splash']*100:5.2f}  "
+                    f"{sig['mdelta']:5.1f}\n"
+                )
+        print(f"[bot] strike dump -> {out}/ ({len(self._strike_history)} frames)")
 
     def _retrieve_action(self) -> None:
         """Fire the hook/retrieve action. Defaults to the cast action."""
@@ -228,19 +264,29 @@ class FishingBot:
 
         delta = vision.frame_delta(self._baseline_bobber, curr)
         vdrop = vision.value_drop(self._baseline_bobber, curr)
-        # Strike signals. The game shows a bright splash (cyan/teal in Bridger
-        # Western, but hue-agnostic) centered on the bobber when the fish
-        # bites. Two independent shape-based signals catch it:
-        #   - bright_splash_fraction: bright saturated pixels appear on the
-        #     otherwise-dark water. Reliable regardless of splash hue.
-        #   - edge_variance_delta: the splash ring adds high-frequency
-        #     structure vs the quiet cast-time baseline.
         splash_frac = vision.bright_splash_fraction(curr)
         edge_delta = vision.edge_variance_delta(self._baseline_bobber, curr)
+        # Frame-to-frame motion (vs previous captured frame, not baseline).
+        # Catches the splash onset even if it was still rising vs baseline.
+        if self._strike_history:
+            prev_frame = self._strike_history[-1][1]
+            mdelta = vision.frame_delta(prev_frame, curr)
+        else:
+            mdelta = 0.0
+
+        # Maintain a rolling ~1.5 s buffer of frames + signals for strike dumps.
+        now = time.perf_counter()
+        sig = {
+            "delta": delta, "vdrop": vdrop, "edgeD": edge_delta,
+            "splash": splash_frac, "mdelta": mdelta,
+        }
+        self._strike_history.append((self._elapsed(), curr.copy(), sig))
+        # Cap memory: keep ~40 entries (~1.5s at 0.035s tick).
+        if len(self._strike_history) > 40:
+            self._strike_history.pop(0)
 
         # Heartbeat log — lets the user see the bot is alive and what values it
         # is seeing, which is critical for tuning the strike thresholds.
-        now = time.perf_counter()
         if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
             self._last_heartbeat = now
             print(
@@ -249,7 +295,7 @@ class FishingBot:
                 f"vdrop={vdrop:5.1f}  "
                 f"splash={splash_frac*100:4.1f}%/{self.cfg.splash_min*100:.1f}%  "
                 f"edgeD={edge_delta:6.1f}/{self.cfg.strike_edge_min:.1f}  "
-                f"hits={self._sink_hits}"
+                f"m={mdelta:4.1f}  hits={self._sink_hits}"
             )
 
         since_cast = now - self._cast_t
@@ -261,13 +307,21 @@ class FishingBot:
         # waiting for 2 consecutive hits on a weak signal misses real bites.
         strong_edge = edge_delta >= self.cfg.strike_edge_min * 2
         strong_splash = splash_frac >= self.cfg.splash_min * 2
-        if strong_edge or strong_splash:
+        strong_motion = mdelta >= 15
+        if strong_edge or strong_splash or strong_motion:
+            if strong_splash:
+                reason = "SPLASH"
+            elif strong_edge:
+                reason = "EDGE"
+            else:
+                reason = "MOTION"
             if self.debug:
-                tag = "EDGE" if strong_edge else "SPLASH"
                 print(
-                    f"[bot] STRIKE ({tag}, single-frame) "
-                    f"edgeD={edge_delta:.1f} splash={splash_frac*100:.2f}%"
+                    f"[bot] STRIKE ({reason}, single-frame) "
+                    f"edgeD={edge_delta:.1f} splash={splash_frac*100:.2f}% "
+                    f"m={mdelta:.1f}"
                 )
+                self._dump_strike_history(reason)
             self._enter(State.RETRIEVING)
             return
 
@@ -277,6 +331,7 @@ class FishingBot:
             or vdrop > 12
             or splash_frac >= self.cfg.splash_min
             or edge_delta >= self.cfg.strike_edge_min
+            or mdelta >= 6
         )
         if weak_hit:
             self._sink_hits += 1
@@ -287,8 +342,10 @@ class FishingBot:
             if self.debug:
                 print(
                     f"[bot] STRIKE (debounced) delta={delta:.1f} vdrop={vdrop:.1f} "
-                    f"splash={splash_frac*100:.2f}% edgeD={edge_delta:.1f}"
+                    f"splash={splash_frac*100:.2f}% edgeD={edge_delta:.1f} "
+                    f"m={mdelta:.1f}"
                 )
+                self._dump_strike_history("DEBOUNCED")
             self._enter(State.RETRIEVING)
 
     # -- RETRIEVING

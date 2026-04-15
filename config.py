@@ -41,10 +41,12 @@ class Config:
     bobber_edge_min: float = 8.0
     # Max consecutive cast attempts that land no bobber before a longer RECOVER pause.
     max_recast_attempts: int = 4
-    # Reaction delay between detecting the bobber sink and firing the retrieve
-    # click. Too short and you click before the fish has fully committed, and
-    # it slips off the hook. Typical working range: 250-600 ms.
-    retrieve_delay_ms: int = 350
+    # Reaction delay between detecting a strike and firing the retrieve click.
+    # With splash-based detection we're already at peak bite time — the old
+    # 350 ms default was tuned for the old dip-based detection and now makes
+    # the bot click *after* the fish has left. Default 60 ms; raise toward
+    # 150-250 only if fish actually slip the hook in your game.
+    retrieve_delay_ms: int = 60
     # Explicit mouse-button hold time for click(). A ~1 ms click (the default
     # for pydirectinput.click()) is sometimes dropped by Roblox; 40-80 ms is
     # reliable without feeling sluggish.
