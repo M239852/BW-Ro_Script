@@ -82,8 +82,15 @@ class FishingBot:
         self.debug = debug
 
         self.templates = vision.load_templates()
-        if debug:
-            print(f"[bot] loaded {len(self.templates)} letter templates")
+        print(f"[bot] loaded {len(self.templates)} letter templates")
+        if len(self.templates) == 0:
+            print(
+                "[bot] WARN: no letter templates found in templates/. "
+                "Run `python generate_templates.py` to build them or "
+                "`python main.py --capture-templates` to crop them from "
+                "the live game. Without templates, the bot can't solve "
+                "the minigame."
+            )
 
         self._stop = threading.Event()
         self.state = State.IDLE
@@ -605,9 +612,34 @@ class FishingBot:
         self._retrieve_action()
 
         deadline = time.perf_counter() + MINIGAME_DETECT_S
+        best_letter_score = 0.0
+        best_bar_fill = 0.0
         while time.perf_counter() < deadline:
             if self._stop.is_set():
                 return
+            # Check the progress bar first — it's the most reliable "minigame
+            # is active" signal and doesn't depend on letter templates. If
+            # the bar has any non-trivial green or red fill, the minigame UI
+            # is definitely on screen even if the current letter glyph hasn't
+            # matched a template yet.
+            try:
+                bar = self.screen.grab(self.cfg.progress_region)
+                green_frac, red_frac = vision.progress_metrics(bar)
+                bar_fill = max(green_frac, red_frac)
+                best_bar_fill = max(best_bar_fill, bar_fill)
+                if bar_fill >= 0.02:
+                    if self.debug:
+                        print(
+                            f"[bot] minigame detected via progress bar "
+                            f"(green={green_frac:.2f} red={red_frac:.2f}) -> MINIGAME"
+                        )
+                    self._enter(State.MINIGAME)
+                    return
+            except Exception as e:
+                if self.debug:
+                    print(f"[bot] progress grab failed: {e}")
+
+            # Also try letter recognition as a secondary trigger.
             try:
                 letter_img = self.screen.grab(self.cfg.letter_region)
             except Exception as e:
@@ -616,6 +648,7 @@ class FishingBot:
                 time.sleep(MINIGAME_DETECT_POLL_S)
                 continue
             letter, score, _ = vision.recognize_letter(letter_img, self.templates)
+            best_letter_score = max(best_letter_score, score)
             if letter is not None:
                 if self.debug:
                     print(
@@ -628,8 +661,9 @@ class FishingBot:
 
         if self.debug:
             print(
-                f"[bot] no minigame prompt in {MINIGAME_DETECT_S:.1f}s — "
-                "plain catch, recasting"
+                f"[bot] no minigame prompt in {MINIGAME_DETECT_S:.1f}s "
+                f"(best letter score={best_letter_score:.2f}, "
+                f"best bar fill={best_bar_fill:.2f}) — plain catch, recasting"
             )
         self._enter(State.CASTING)
 
@@ -676,9 +710,23 @@ class FishingBot:
 
         now = time.perf_counter()
         if letter is None:
-            if processed is not None and score < 0.3 and self.debug:
-                # Likely no prompt visible; don't spam.
-                pass
+            # Letter region has a glyph but no template matched above the
+            # 0.85 threshold. This almost always means the templates don't
+            # match the in-game font well enough. Dump the processed glyph
+            # so the user can see exactly what the recognizer is trying
+            # to match against, rate-limited so we don't spam disk.
+            if self.debug and processed is not None:
+                last_t = getattr(self, "_last_unknown_log_t", 0.0)
+                if now - last_t >= 0.5:
+                    print(
+                        f"[bot] letter UNRECOGNIZED  best_score={score:.2f} "
+                        f"(need >= 0.85). Dumping glyph to debug/unknown/."
+                    )
+                    try:
+                        vision.save_unknown(processed)
+                    except Exception as e:
+                        print(f"[bot] save_unknown failed: {e}")
+                    self._last_unknown_log_t = now
             return
 
         if letter == self._last_letter and (now - self._last_letter_t) < 0.4:
