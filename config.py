@@ -41,6 +41,10 @@ class Config:
     bobber_edge_min: float = 8.0
     # Max consecutive cast attempts that land no bobber before a longer RECOVER pause.
     max_recast_attempts: int = 4
+    # Reaction delay between detecting the bobber sink and firing the retrieve
+    # click. Too short and you click before the fish has fully committed, and
+    # it slips off the hook. Typical working range: 250-600 ms.
+    retrieve_delay_ms: int = 350
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -73,6 +77,7 @@ class Config:
             fail_red=float(d.get("fail_red", 0.50)),
             bobber_edge_min=float(d.get("bobber_edge_min", 8.0)),
             max_recast_attempts=int(d.get("max_recast_attempts", 4)),
+            retrieve_delay_ms=int(d.get("retrieve_delay_ms", 350)),
         )
 
 

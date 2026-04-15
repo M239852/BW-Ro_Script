@@ -248,9 +248,16 @@ class FishingBot:
     def _handle_retrieving(self) -> None:
         """Hook the fish. Most Roblox fishing games use the same button as
         cast, so by default this fires the cast action again. Override with
-        retrieve_point / retrieve_key in config.json if the game differs."""
+        retrieve_point / retrieve_key in config.json if the game differs.
+
+        A reaction delay (retrieve_delay_ms) is applied *before* the click so
+        the fish has time to fully commit to the bobber. Clicking too fast on
+        the first dip frame causes the fish to slip the hook."""
+        delay_s = max(0.0, self.cfg.retrieve_delay_ms / 1000.0)
         if self.debug:
-            print("[bot] retrieving (hook the fish)")
+            print(f"[bot] retrieving: wait {delay_s*1000:.0f} ms then hook")
+        if not self._interruptible_sleep(delay_s):
+            return
         self._retrieve_action()
         # Give the minigame UI a moment to appear.
         self._interruptible_sleep(RETRIEVE_WAIT_S)

@@ -110,6 +110,7 @@ Everything is in `config.json`:
 | `hold_ms` | keydown hold time in ms | `60` |
 | `cast_key` / `chest_key` | key names passed to pydirectinput | `1` / `e` |
 | `retrieve_point` / `retrieve_key` | optional — action to "hook" the fish when bobber sinks. Defaults to the cast action (same button casts and hooks in most Roblox fishing games). | `null` |
+| `retrieve_delay_ms` | wait after detecting the bobber sink before firing the retrieve click, so the fish has time to fully commit to the bobber. Raise if fish keep slipping the hook, lower if you're watching prompts time out. Typical working range 250–600. | `350` |
 
 **Tuning with `--debug`.** In debug mode the bot prints:
 - `bobber edge var=XX.X` right after each cast — if this is consistently below `bobber_edge_min` even when a bobber is visible, lower `bobber_edge_min` to match.
