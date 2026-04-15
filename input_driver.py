@@ -27,10 +27,20 @@ except ImportError:
     _HAS_PDI = False
 
 
-def _focus_window_by_title(title: str) -> bool:
-    """Best-effort bring a window to the foreground by substring title match.
+def _focus_window_by_title(title: str, debug: bool = False) -> bool:
+    """Best-effort bring a window to the foreground by **strict** title match.
 
-    Returns True if a matching window was found and focused. On non-Windows
+    The match is exact (case-insensitive), OR the window title starts with
+    ``title + " "`` / ``title + "-"`` so things like ``"Roblox - MyGame"``
+    still resolve. Substring matching is intentionally avoided because a
+    working directory such as ``BW-Ro_Script-...-roblox-...`` can end up in
+    the terminal window title and fool a naive substring match, causing the
+    bot to focus its own PowerShell window and tab out of the game.
+
+    Windows belonging to common shell / terminal / editor processes are also
+    skipped even if their title matches, so this is belt-and-suspenders safe.
+
+    Returns True iff a matching window was found and focused. On non-Windows
     platforms returns False without raising.
     """
     if sys.platform != "win32":
@@ -39,34 +49,79 @@ def _focus_window_by_title(title: str) -> bool:
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
 
-        EnumWindows = user32.EnumWindows
+        SKIP_PROCESSES = {
+            "powershell.exe", "pwsh.exe", "cmd.exe",
+            "windowsterminal.exe", "conhost.exe",
+            "code.exe", "explorer.exe",
+            "python.exe", "py.exe", "pythonw.exe",
+        }
+
         EnumWindowsProc = ctypes.WINFUNCTYPE(
-            ctypes.c_bool, ctypes.c_int, ctypes.c_int
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
         )
-        GetWindowTextLength = user32.GetWindowTextLengthW
-        GetWindowText = user32.GetWindowTextW
-        IsWindowVisible = user32.IsWindowVisible
-
         found_hwnd = [0]
+        found_title = [""]
+        title_l = title.lower()
+
+        def _process_name(hwnd: int) -> str:
+            try:
+                pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                h = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+                )
+                if not h:
+                    return ""
+                try:
+                    buf = ctypes.create_unicode_buffer(520)
+                    size = ctypes.c_ulong(520)
+                    if kernel32.QueryFullProcessImageNameW(
+                        h, 0, buf, ctypes.byref(size)
+                    ):
+                        return buf.value.rsplit("\\", 1)[-1]
+                finally:
+                    kernel32.CloseHandle(h)
+            except Exception:
+                pass
+            return ""
 
         def _cb(hwnd, _lparam):
-            if not IsWindowVisible(hwnd):
+            if not user32.IsWindowVisible(hwnd):
                 return True
-            length = GetWindowTextLength(hwnd)
+            length = user32.GetWindowTextLengthW(hwnd)
             if length == 0:
                 return True
             buf = ctypes.create_unicode_buffer(length + 1)
-            GetWindowText(hwnd, buf, length + 1)
-            if title.lower() in buf.value.lower():
-                found_hwnd[0] = hwnd
-                return False  # stop enumeration
-            return True
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            wtitle = buf.value
+            wl = wtitle.lower()
+            # Strict: exact, or starts with "<title> " / "<title>-" so
+            # titles like "Roblox - GameName" resolve while substring
+            # matches against random paths are rejected.
+            if (
+                wl != title_l
+                and not wl.startswith(title_l + " ")
+                and not wl.startswith(title_l + "-")
+            ):
+                return True
+            proc = _process_name(hwnd).lower()
+            if proc in SKIP_PROCESSES:
+                if debug:
+                    print(f"[input] skipping {wtitle!r} (process {proc})")
+                return True
+            found_hwnd[0] = hwnd
+            found_title[0] = wtitle
+            return False  # stop enumeration
 
-        EnumWindows(EnumWindowsProc(_cb), 0)
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
         if not found_hwnd[0]:
             return False
 
+        if debug:
+            print(f"[input] focusing {found_title[0]!r}")
         hwnd = found_hwnd[0]
         # Restore if minimized (SW_RESTORE = 9)
         user32.ShowWindow(hwnd, 9)
@@ -143,7 +198,7 @@ class Input:
                 print(f"[input] cast -> press '{cast_key}'")
             self.press(cast_key)
 
-    def focus_game(self, title: Optional[str]) -> bool:
+    def focus_game(self, title: Optional[str], debug: bool = False) -> bool:
         """Best-effort force-focus the game window before sending input.
 
         Returns True if focus was changed. Silently returns False if title
@@ -151,14 +206,15 @@ class Input:
         """
         if self.dry_run or not title:
             return False
-        ok = _focus_window_by_title(title)
+        ok = _focus_window_by_title(title, debug=debug)
         if not ok:
             # One retry after a short pause — Windows sometimes rejects the
             # first SetForegroundWindow if another process recently used it.
             time.sleep(0.05)
-            ok = _focus_window_by_title(title)
+            ok = _focus_window_by_title(title, debug=debug)
         if not ok:
-            print(f"[input] WARN could not focus window containing '{title}'")
+            print(f"[input] WARN no window matching title '{title}' "
+                  "(expected exact match or 'Roblox - ...' prefix)")
         return ok
 
     def release_all(self) -> None:

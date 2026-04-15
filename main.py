@@ -104,6 +104,60 @@ def _capture_templates_mode(cfg: Config, screen: Screen) -> None:
         print("\n[main] capture aborted")
 
 
+def _list_windows_mode() -> None:
+    """Diagnostic: print every visible window title + process name so the
+    user can verify what focus_window_title should match."""
+    if sys.platform != "win32":
+        print("[main] --list-windows is Windows-only")
+        return
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    EnumWindowsProc = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
+    )
+    rows = []
+
+    def _process_name(hwnd):
+        try:
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            h = kernel32.OpenProcess(0x1000, False, pid.value)
+            if not h:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(520)
+                size = ctypes.c_ulong(520)
+                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return buf.value.rsplit("\\", 1)[-1]
+            finally:
+                kernel32.CloseHandle(h)
+        except Exception:
+            pass
+        return ""
+
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        rows.append((buf.value, _process_name(hwnd)))
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(_cb), 0)
+    print("\n=== Visible windows ===")
+    for title, proc in rows:
+        print(f"  [{proc:<24}]  {title}")
+    print(
+        f"\nTotal: {len(rows)} windows. Set config.json -> focus_window_title "
+        "to the exact window title of your Roblox client (usually just 'Roblox')."
+    )
+
+
 def _test_input_mode(cfg: Config, inp: Input) -> None:
     """Diagnostic: fire cast -> pause -> retrieve three times, no sink
     detection, no minigame. Use this to prove that the click/focus/coords
@@ -123,12 +177,12 @@ def _test_input_mode(cfg: Config, inp: Input) -> None:
 
     for cycle in range(3):
         print(f"\n--- cycle {cycle+1}/3 ---")
-        inp.focus_game(cfg.focus_window_title)
+        inp.focus_game(cfg.focus_window_title, debug=True)
         print("[test] CAST")
         inp.cast(cfg.cast_point, cfg.cast_key)
         time.sleep(3.0)
 
-        inp.focus_game(cfg.focus_window_title)
+        inp.focus_game(cfg.focus_window_title, debug=True)
         print("[test] RETRIEVE")
         if rp is not None:
             inp.click(int(rp[0]), int(rp[1]))
@@ -138,7 +192,8 @@ def _test_input_mode(cfg: Config, inp: Input) -> None:
 
     print("\nDone. If neither cast nor retrieve produced a visible action in "
           "Roblox, the click path is failing — check focus title, cast_point "
-          "coordinates, and Windows DPI scaling.")
+          "coordinates, and Windows DPI scaling. Run `python main.py "
+          "--list-windows` to see what titles are actually present.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,12 +205,18 @@ def parse_args() -> argparse.Namespace:
                    help="Interactively build the A-Z template library")
     p.add_argument("--test-input", action="store_true",
                    help="Diagnostic: fire cast/retrieve a few times with no sink detection")
+    p.add_argument("--list-windows", action="store_true",
+                   help="Diagnostic: list all visible window titles + process names and exit")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     _set_dpi_aware()
+
+    if args.list_windows:
+        _list_windows_mode()
+        return 0
 
     cfg = config.load()
     if cfg is None or args.calibrate:

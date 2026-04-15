@@ -142,7 +142,7 @@ class FishingBot:
         """Fire the hook/retrieve action. Defaults to the cast action."""
         rp = self.cfg.retrieve_point if self.cfg.retrieve_point is not None else self.cfg.cast_point
         rk = self.cfg.retrieve_key if self.cfg.retrieve_key is not None else self.cfg.cast_key
-        self.inp.focus_game(self.cfg.focus_window_title)
+        self.inp.focus_game(self.cfg.focus_window_title, debug=self.debug)
         if self.debug:
             target = f"click {rp}" if rp is not None else f"key '{rk}'"
             print(f"[bot] retrieve target={target}")
@@ -161,7 +161,7 @@ class FishingBot:
                 else f"key '{self.cfg.cast_key}'"
             )
             print(f"[bot] cast attempt #{self._cast_attempts}  target={target}")
-        self.inp.focus_game(self.cfg.focus_window_title)
+        self.inp.focus_game(self.cfg.focus_window_title, debug=self.debug)
         self.inp.cast(self.cfg.cast_point, self.cfg.cast_key)
         self._cast_t = time.perf_counter()
 

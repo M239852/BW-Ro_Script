@@ -124,7 +124,8 @@ python main.py --test-input
 
 It fires cast → wait 3 s → retrieve three times with no sink detection. Watch Roblox and console output. Common failure modes:
 
-- **`WARN could not focus window containing 'Roblox'`** — the game window title doesn't contain "Roblox" (uncommon, but happens in web-player builds). Edit `focus_window_title` in `config.json` to match whatever your Roblox window is actually called.
+- **Bot tabs *out* of Roblox after the first cast.** The focus search is matching the wrong window. The title match is strict (exact or `"Roblox - GameName"`-style prefix) and common terminal/editor processes are skipped, so this is rare — but if it happens, run `python main.py --list-windows` and look for your Roblox window. Set `focus_window_title` in `config.json` to match the exact title you see.
+- **`WARN no window matching title 'Roblox'`** — your Roblox client isn't titled "Roblox" (uncommon, but some web-player builds are different). Use `--list-windows` to find the right title and set it in `config.json`.
 - **`WARN cursor at (X,Y) not (A,B)`** — the OS isn't moving the cursor to where you asked. Usually means Windows DPI scaling isn't matching what `mss` captured during calibration. Re-run `python main.py --calibrate` after making sure Roblox and Windows are both at 100% display scaling.
 - **Cursor moves to the right place but nothing happens in-game** — the click is being dropped. Raise `click_hold_ms` to 80 or 100.
 - **Cursor doesn't move at all and no warnings** — focus_window_title is disabled/unmatched and another window is intercepting. Make sure Roblox is actually visible and un-minimized.
