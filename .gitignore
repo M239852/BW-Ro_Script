@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+config.json
+debug/
+templates/unknown/
+.venv/
+venv/
+.idea/
+.vscode/
