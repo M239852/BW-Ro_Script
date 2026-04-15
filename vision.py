@@ -68,6 +68,18 @@ def value_drop(baseline: np.ndarray, curr: np.ndarray) -> float:
     return float(a - b)
 
 
+def bobber_edge_variance(img: np.ndarray) -> float:
+    """Laplacian variance — low for featureless water, high when a bobber is present.
+
+    Empty water (small ripples) typically yields variance < 5.
+    A bobber with red/white contrast typically yields variance > 30.
+    """
+    if img.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 # --- progress bar ----------------------------------------------------------
 
 ProgressState = Literal["filling", "win", "fail", "unknown"]

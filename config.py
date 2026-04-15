@@ -28,15 +28,26 @@ class Config:
     cast_point: Optional[Tuple[int, int]] = None
     cast_key: str = "1"
     chest_key: str = "e"
+    # Retrieve ("hook the fish") action. If None, falls back to the cast action,
+    # which is correct for most Roblox fishing games (same button casts and hooks).
+    retrieve_point: Optional[Tuple[int, int]] = None
+    retrieve_key: Optional[str] = None
     hold_ms: int = 60
     sink_threshold: float = 18.0
     win_fill: float = 0.90
     fail_red: float = 0.50
+    # Bobber-presence check: Laplacian edge variance below this means "no bobber
+    # visible in the region" (empty water). Recast instead of waiting for a sink.
+    bobber_edge_min: float = 8.0
+    # Max consecutive cast attempts that land no bobber before a longer RECOVER pause.
+    max_recast_attempts: int = 4
 
     def to_dict(self) -> dict:
         d = asdict(self)
         if self.cast_point is not None:
             d["cast_point"] = list(self.cast_point)
+        if self.retrieve_point is not None:
+            d["retrieve_point"] = list(self.retrieve_point)
         return d
 
     @classmethod
@@ -44,6 +55,9 @@ class Config:
         cp = d.get("cast_point")
         if cp is not None:
             cp = tuple(cp)
+        rp = d.get("retrieve_point")
+        if rp is not None:
+            rp = tuple(rp)
         return cls(
             letter_region=Region(**d["letter_region"]),
             bobber_region=Region(**d["bobber_region"]),
@@ -51,10 +65,14 @@ class Config:
             cast_point=cp,
             cast_key=d.get("cast_key", "1"),
             chest_key=d.get("chest_key", "e"),
+            retrieve_point=rp,
+            retrieve_key=d.get("retrieve_key"),
             hold_ms=int(d.get("hold_ms", 60)),
             sink_threshold=float(d.get("sink_threshold", 18.0)),
             win_fill=float(d.get("win_fill", 0.90)),
             fail_red=float(d.get("fail_red", 0.50)),
+            bobber_edge_min=float(d.get("bobber_edge_min", 8.0)),
+            max_recast_attempts=int(d.get("max_recast_attempts", 4)),
         )
 
 

@@ -76,12 +76,19 @@ Everything is in `config.json`:
 | key | meaning | default |
 |---|---|---|
 | `sink_threshold` | mean pixel delta on bobber region to call "sink" | `18.0` |
+| `bobber_edge_min` | Laplacian edge variance below which "no bobber visible" (empty water) | `8.0` |
+| `max_recast_attempts` | consecutive cast misses before a longer RECOVER pause | `4` |
 | `win_fill` | green fraction of progress bar meaning "win" | `0.90` |
 | `fail_red` | red fraction meaning "fail" | `0.50` |
 | `hold_ms` | keydown hold time in ms | `60` |
 | `cast_key` / `chest_key` | key names passed to pydirectinput | `1` / `e` |
+| `retrieve_point` / `retrieve_key` | optional — action to "hook" the fish when bobber sinks. Defaults to the cast action (same button casts and hooks in most Roblox fishing games). | `null` |
 
-If sinks aren't detected, lower `sink_threshold`. If it false-triggers, raise it.
+**Tuning with `--debug`.** In debug mode the bot prints:
+- `bobber edge var=XX.X` right after each cast — if this is consistently below `bobber_edge_min` even when a bobber is visible, lower `bobber_edge_min` to match.
+- A heartbeat every ~3s during `WAITING_SINK` showing the live `delta`/`vdrop` values. If you see a real sink happen but `delta` never crosses `sink_threshold`, lower it. If it false-triggers, raise it.
+
+If the bot casts but nothing happens, the issue is almost always `bobber_edge_min` or `sink_threshold`; watch one full cycle with `--debug` and adjust.
 
 ## File layout
 
@@ -91,7 +98,7 @@ config.py         # Config dataclass + config.json IO
 calibrate.py      # tkinter overlay for drag-select calibration
 vision.py         # screen capture + letter/sink/progress detection
 input_driver.py   # pydirectinput wrapper, dry-run aware
-state_machine.py  # FishingBot: IDLE -> CASTING -> WAITING_SINK -> MINIGAME -> CHEST/RECOVER
+state_machine.py  # FishingBot: CASTING -> WAITING_SINK -> RETRIEVING -> MINIGAME -> CHEST/RECOVER
 templates/        # A.png..Z.png learned by --capture-templates
 config.json       # calibration output (created on first run)
 ```

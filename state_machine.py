@@ -20,6 +20,7 @@ class State(Enum):
     IDLE = "IDLE"
     CASTING = "CASTING"
     WAITING_SINK = "WAITING_SINK"
+    RETRIEVING = "RETRIEVING"
     MINIGAME = "MINIGAME"
     CHEST = "CHEST"
     RECOVER = "RECOVER"
@@ -30,6 +31,16 @@ CAST_LOCKOUT_S = 0.8
 SINK_TIMEOUT_S = 20.0
 MINIGAME_MAX_S = 45.0
 LETTER_DEBOUNCE_S = 0.08
+
+# Post-cast settle: how long to wait for the bobber to land and ripples to
+# calm before snapshotting the sink baseline. Too short and the baseline is
+# noisy; too long and we waste fishing time. 1.8 s is a reasonable middle.
+CAST_SETTLE_S = 1.8
+CAST_SETTLE_FRAMES = 6
+# Heartbeat interval for WAITING_SINK debug log.
+HEARTBEAT_S = 3.0
+# After retrieve click, how long to wait for the minigame UI to pop.
+RETRIEVE_WAIT_S = 0.5
 
 
 class FishingBot:
@@ -62,6 +73,10 @@ class FishingBot:
         self._win_hits: int = 0
         self._fail_hits: int = 0
         self._last_green_frac: float = 0.0
+        self._last_heartbeat: float = 0.0
+        # Persistent across state transitions — counts consecutive "no bobber
+        # after cast" failures so we can back off after repeated misses.
+        self._cast_attempts: int = 0
 
         if debug:
             Path("debug").mkdir(exist_ok=True)
@@ -105,6 +120,8 @@ class FishingBot:
             self._handle_casting()
         elif self.state == State.WAITING_SINK:
             self._handle_waiting_sink()
+        elif self.state == State.RETRIEVING:
+            self._handle_retrieving()
         elif self.state == State.MINIGAME:
             self._handle_minigame()
         elif self.state == State.CHEST:
@@ -112,17 +129,72 @@ class FishingBot:
         elif self.state == State.RECOVER:
             self._handle_recover()
 
+    def _interruptible_sleep(self, seconds: float) -> bool:
+        """Sleep in small chunks so F6/Esc aborts quickly. Returns False if stopped."""
+        end = time.perf_counter() + seconds
+        while time.perf_counter() < end:
+            if self._stop.is_set():
+                return False
+            time.sleep(min(0.05, end - time.perf_counter()))
+        return True
+
+    def _retrieve_action(self) -> None:
+        """Fire the hook/retrieve action. Defaults to the cast action."""
+        rp = self.cfg.retrieve_point if self.cfg.retrieve_point is not None else self.cfg.cast_point
+        rk = self.cfg.retrieve_key if self.cfg.retrieve_key is not None else self.cfg.cast_key
+        if rp is not None:
+            self.inp.click(int(rp[0]), int(rp[1]))
+        else:
+            self.inp.press(rk)
+
     # -- CASTING
     def _handle_casting(self) -> None:
+        self._cast_attempts += 1
+        if self.debug:
+            print(f"[bot] cast attempt #{self._cast_attempts}")
         self.inp.cast(self.cfg.cast_point, self.cfg.cast_key)
         self._cast_t = time.perf_counter()
-        # Let the cast animation settle before snapshotting the baseline.
-        time.sleep(0.6)
-        try:
-            self._baseline_bobber = self.screen.grab(self.cfg.bobber_region)
-        except Exception as e:
-            print(f"[bot] bobber grab failed: {e}")
+
+        # Collect settle frames over ~CAST_SETTLE_S so we can (a) average them
+        # into a stable baseline and (b) verify a bobber actually appeared.
+        frames = []
+        dt = CAST_SETTLE_S / CAST_SETTLE_FRAMES
+        for _ in range(CAST_SETTLE_FRAMES):
+            if not self._interruptible_sleep(dt):
+                return
+            try:
+                frames.append(self.screen.grab(self.cfg.bobber_region))
+            except Exception as e:
+                if self.debug:
+                    print(f"[bot] bobber grab failed during settle: {e}")
+
+        if not frames:
             self._baseline_bobber = None
+            self._enter(State.WAITING_SINK)
+            return
+
+        last = frames[-1]
+        edge_var = vision.bobber_edge_variance(last)
+        if self.debug:
+            print(f"[bot] bobber edge var={edge_var:.1f} (min {self.cfg.bobber_edge_min:.1f})")
+
+        if edge_var < self.cfg.bobber_edge_min:
+            # No bobber landed in the calibrated region.
+            if self._cast_attempts >= self.cfg.max_recast_attempts:
+                print(f"[bot] {self._cast_attempts} casts with no bobber; pausing to recover")
+                self._cast_attempts = 0
+                self._enter(State.RECOVER)
+            else:
+                if self.debug:
+                    print("[bot] no bobber in water; recasting")
+                self._enter(State.CASTING)
+            return
+
+        # Bobber is present. Build a robust averaged baseline from the last few
+        # settle frames so natural ripples don't look like a sink.
+        tail = frames[-3:] if len(frames) >= 3 else frames
+        self._baseline_bobber = np.mean(np.stack(tail).astype(np.float32), axis=0).astype(np.uint8)
+        self._cast_attempts = 0
         self._enter(State.WAITING_SINK)
 
     # -- WAITING_SINK
@@ -134,15 +206,31 @@ class FishingBot:
             return
 
         if self._baseline_bobber is None:
+            self._enter(State.RECOVER)
             return
-        curr = self.screen.grab(self.cfg.bobber_region)
+
+        try:
+            curr = self.screen.grab(self.cfg.bobber_region)
+        except Exception as e:
+            if self.debug:
+                print(f"[bot] bobber grab failed: {e}")
+            return
+
         delta = vision.frame_delta(self._baseline_bobber, curr)
         vdrop = vision.value_drop(self._baseline_bobber, curr)
 
-        if self.debug and int(self._elapsed() * 10) % 5 == 0:
-            pass  # silence heavy log
+        # Heartbeat log — lets the user see the bot is alive and what values it
+        # is seeing, which is critical for tuning sink_threshold.
+        now = time.perf_counter()
+        if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
+            self._last_heartbeat = now
+            print(
+                f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
+                f"delta={delta:5.1f} (thr {self.cfg.sink_threshold:.1f})  "
+                f"vdrop={vdrop:5.1f}  hits={self._sink_hits}"
+            )
 
-        since_cast = time.perf_counter() - self._cast_t
+        since_cast = now - self._cast_t
         if since_cast < CAST_LOCKOUT_S:
             return
 
@@ -154,7 +242,19 @@ class FishingBot:
         if self._sink_hits >= 2:
             if self.debug:
                 print(f"[bot] SINK delta={delta:.1f} vdrop={vdrop:.1f}")
-            self._enter(State.MINIGAME)
+            self._enter(State.RETRIEVING)
+
+    # -- RETRIEVING
+    def _handle_retrieving(self) -> None:
+        """Hook the fish. Most Roblox fishing games use the same button as
+        cast, so by default this fires the cast action again. Override with
+        retrieve_point / retrieve_key in config.json if the game differs."""
+        if self.debug:
+            print("[bot] retrieving (hook the fish)")
+        self._retrieve_action()
+        # Give the minigame UI a moment to appear.
+        self._interruptible_sleep(RETRIEVE_WAIT_S)
+        self._enter(State.MINIGAME)
 
     # -- MINIGAME
     def _handle_minigame(self) -> None:
@@ -225,7 +325,10 @@ class FishingBot:
 
     # -- RECOVER
     def _handle_recover(self) -> None:
-        time.sleep(1.5)
+        # Longer pause lets any in-progress animation or failed-minigame UI
+        # clear before we try again. Interruptible so F6/Esc still works.
+        self._interruptible_sleep(1.8)
+        self._cast_attempts = 0
         self._enter(State.CASTING)
 
     # -- debug dump
