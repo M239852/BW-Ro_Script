@@ -32,11 +32,19 @@ SINK_TIMEOUT_S = 20.0
 MINIGAME_MAX_S = 45.0
 LETTER_DEBOUNCE_S = 0.08
 
-# Post-cast settle: how long to wait for the bobber to land and ripples to
-# calm before snapshotting the sink baseline. Too short and the baseline is
-# noisy; too long and we waste fishing time. 1.8 s is a reasonable middle.
-CAST_SETTLE_S = 1.8
-CAST_SETTLE_FRAMES = 6
+# Post-cast settle: we used to wait a fixed 1.8 s for the bobber to land,
+# but the initial cast-impact splash on the water is large and can still
+# be dissipating after 2+ seconds. A fixed wait either cuts off the splash
+# (polluted baseline → instant false strike) or wastes time. Instead we
+# poll the region at SETTLE_SAMPLE_S intervals and wait until the frame-
+# to-frame delta has been below SETTLE_QUIET_DELTA for SETTLE_QUIET_FRAMES
+# consecutive samples — i.e. the water is actually stable. Capped at
+# SETTLE_MAX_S so a stubborn splash can't hang the bot forever.
+SETTLE_SAMPLE_S = 0.20
+SETTLE_QUIET_DELTA = 4.0
+SETTLE_QUIET_FRAMES = 4
+SETTLE_MIN_S = 0.8
+SETTLE_MAX_S = 6.0
 # Heartbeat interval for WAITING_SINK debug log.
 HEARTBEAT_S = 3.0
 # After retrieve click, how long to wait for the minigame UI to pop.
@@ -215,18 +223,49 @@ class FishingBot:
         self.inp.cast(self.cfg.cast_point, self.cfg.cast_key)
         self._cast_t = time.perf_counter()
 
-        # Collect settle frames over ~CAST_SETTLE_S so we can (a) average them
-        # into a stable baseline and (b) verify a bobber actually appeared.
-        frames = []
-        dt = CAST_SETTLE_S / CAST_SETTLE_FRAMES
-        for _ in range(CAST_SETTLE_FRAMES):
-            if not self._interruptible_sleep(dt):
-                return
+        # Adaptive settle: poll the bobber region until the water stabilizes.
+        # The cast-impact splash is large and can still be dissipating 2+ s
+        # after cast; a fixed wait pollutes the baseline with splash pixels,
+        # and that corrupted baseline then fires a false strike the instant
+        # the splash clears (because "quiet water" now looks like a drop vs
+        # "splash-covered water"). Wait until frame-to-frame delta is low
+        # for SETTLE_QUIET_FRAMES consecutive samples.
+        frames: list = []
+        quiet_count = 0
+        settle_start = time.perf_counter()
+        if not self._interruptible_sleep(SETTLE_MIN_S):
+            return
+        while True:
+            elapsed_settle = time.perf_counter() - settle_start
+            if elapsed_settle >= SETTLE_MAX_S:
+                if self.debug:
+                    print(f"[bot] settle max {SETTLE_MAX_S:.1f}s reached "
+                          f"without stabilizing; proceeding anyway")
+                break
             try:
-                frames.append(self.screen.grab(self.cfg.bobber_region))
+                f = self.screen.grab(self.cfg.bobber_region)
             except Exception as e:
                 if self.debug:
                     print(f"[bot] bobber grab failed during settle: {e}")
+                if not self._interruptible_sleep(SETTLE_SAMPLE_S):
+                    return
+                continue
+            frames.append(f)
+            if len(frames) >= 2:
+                d = vision.frame_delta(frames[-2], f)
+                if d < SETTLE_QUIET_DELTA:
+                    quiet_count += 1
+                else:
+                    quiet_count = 0
+                if self.debug and len(frames) % 3 == 0:
+                    print(f"[bot] settling t={elapsed_settle:.1f}s "
+                          f"delta={d:.1f} quiet={quiet_count}/{SETTLE_QUIET_FRAMES}")
+                if quiet_count >= SETTLE_QUIET_FRAMES:
+                    if self.debug:
+                        print(f"[bot] water settled after {elapsed_settle:.1f}s")
+                    break
+            if not self._interruptible_sleep(SETTLE_SAMPLE_S):
+                return
 
         if not frames:
             self._baseline_bobber = None
