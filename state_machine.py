@@ -469,6 +469,24 @@ class FishingBot:
         pos_shift = 0
         if self._bobber_template is not None:
             bscore, bloc = vision.track_bobber(curr, self._bobber_template)
+            # Adaptive home tracking. The bobber physically drifts on the
+            # water surface due to wind/current — over tens of seconds it
+            # can migrate tens of pixels from its cast-time home without
+            # any fish involvement. If we always compare to the cast-time
+            # home, that accumulated drift eventually looks like a sustained
+            # pos_shift and fires a false strike.
+            #
+            # While we're clearly still tracking the bobber (high match
+            # score), smoothly slide the "home" position toward the current
+            # match location using an EMA. pos_shift then measures only
+            # *momentary* motion against the current actual position, not
+            # accumulated drift against the cast-time position. During a
+            # real bite the score craters, so adaptive tracking stops
+            # updating home and the bite still registers cleanly.
+            if bscore >= 0.75:
+                hx = int(round(0.75 * self._bobber_home[0] + 0.25 * bloc[0]))
+                hy = int(round(0.75 * self._bobber_home[1] + 0.25 * bloc[1]))
+                self._bobber_home = (hx, hy)
             score_drop = self._bobber_score_rest - bscore
             pos_shift = abs(bloc[0] - self._bobber_home[0]) + abs(bloc[1] - self._bobber_home[1])
 
@@ -510,7 +528,7 @@ class FishingBot:
                 print(
                     f"[bot] waiting sink  t={self._elapsed():4.1f}s  FALLBACK  "
                     f"delta={delta:.1f}/{self.cfg.sink_threshold:.1f}  "
-                    f"vdrop={vdrop:.1f}/12.0  "
+                    f"vdrop={vdrop:.1f}/6.0  "
                     f"wfrac={drop_frac_live*100:3.0f}%/{DROP_WINDOW_FRAC*100:.0f}% "
                     f"(n={len(self._drop_flags)})"
                 )
@@ -546,14 +564,27 @@ class FishingBot:
         #   The rolling-window fraction still gives rain-resistance here
         #   because isolated noise frames don't fill the window.
         if self._bobber_template is not None and self._bobber_score_rest > 0.5:
+            # Catastrophic score path: bscore < 0.40 means the template is
+            # essentially unfindable in the region — the bobber is under
+            # water or otherwise completely obscured. This alone fires a
+            # strike with no position requirement. Rain/weather rarely
+            # drives bscore that deep even briefly, and the rolling-window
+            # 80% threshold would still reject any isolated rain spike.
+            catastrophic = bscore < 0.40
+            # Moderate drop path: bscore noticeably below rest, AND the
+            # best-match location has shifted. Both required (rain defense).
             abs_low = bscore < 0.55
             rel_drop = score_drop >= self.cfg.bobber_score_drop
             score_bad = abs_low or rel_drop
             pos_bad = pos_shift >= self.cfg.bobber_pos_shift
-            dropped_now = score_bad and pos_bad
+            dropped_now = catastrophic or (score_bad and pos_bad)
             path = "TEMPLATE"
         else:
-            dropped_now = delta > self.cfg.sink_threshold or vdrop > 12
+            # Fallback uses config-driven sink_threshold (delta) and a
+            # hardcoded vdrop floor. Both are intentionally sensitive —
+            # the rolling-window 80%-over-bobber_lost_ms requirement is
+            # what prevents brief noise spikes from triggering here.
+            dropped_now = delta > self.cfg.sink_threshold or vdrop > 6
             path = "FALLBACK"
 
         self._drop_flags.append((now, dropped_now))
