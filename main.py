@@ -7,6 +7,9 @@ Usage:
     python main.py --debug          # verbose logging + dumps to debug/
     python main.py --capture-templates
                                     # live-build A-Z templates from prompts
+    python main.py --test-input     # fire cast -> wait -> retrieve a few times
+                                    # to verify input reaches the game,
+                                    # without sink detection or minigame logic
 """
 from __future__ import annotations
 
@@ -101,6 +104,43 @@ def _capture_templates_mode(cfg: Config, screen: Screen) -> None:
         print("\n[main] capture aborted")
 
 
+def _test_input_mode(cfg: Config, inp: Input) -> None:
+    """Diagnostic: fire cast -> pause -> retrieve three times, no sink
+    detection, no minigame. Use this to prove that the click/focus/coords
+    path actually delivers input to the game."""
+    print("\n=== Input test mode ===")
+    print("Switch to Roblox NOW. Starting in 4 seconds...")
+    for i in range(4, 0, -1):
+        print(f"  {i}...")
+        time.sleep(1)
+
+    rp = cfg.retrieve_point if cfg.retrieve_point is not None else cfg.cast_point
+    rk = cfg.retrieve_key if cfg.retrieve_key is not None else cfg.cast_key
+    print(f"cast target    = {cfg.cast_point if cfg.cast_point else repr(cfg.cast_key)}")
+    print(f"retrieve target= {rp if rp else repr(rk)}")
+    print(f"focus title    = {cfg.focus_window_title!r}")
+    print(f"click_hold_ms  = {cfg.click_hold_ms}")
+
+    for cycle in range(3):
+        print(f"\n--- cycle {cycle+1}/3 ---")
+        inp.focus_game(cfg.focus_window_title)
+        print("[test] CAST")
+        inp.cast(cfg.cast_point, cfg.cast_key)
+        time.sleep(3.0)
+
+        inp.focus_game(cfg.focus_window_title)
+        print("[test] RETRIEVE")
+        if rp is not None:
+            inp.click(int(rp[0]), int(rp[1]))
+        else:
+            inp.press(rk)
+        time.sleep(3.0)
+
+    print("\nDone. If neither cast nor retrieve produced a visible action in "
+          "Roblox, the click path is failing — check focus title, cast_point "
+          "coordinates, and Windows DPI scaling.")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Bridger Western fishing bot")
     p.add_argument("--calibrate", action="store_true", help="(Re)run region calibration")
@@ -108,6 +148,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug", action="store_true", help="Verbose logging + debug dumps")
     p.add_argument("--capture-templates", action="store_true",
                    help="Interactively build the A-Z template library")
+    p.add_argument("--test-input", action="store_true",
+                   help="Diagnostic: fire cast/retrieve a few times with no sink detection")
     return p.parse_args()
 
 
@@ -127,7 +169,17 @@ def main() -> int:
         screen.close()
         return 0
 
-    inp = Input(dry_run=args.dry_run, hold_ms=cfg.hold_ms)
+    inp = Input(
+        dry_run=args.dry_run,
+        hold_ms=cfg.hold_ms,
+        click_hold_ms=cfg.click_hold_ms,
+    )
+
+    if args.test_input:
+        _test_input_mode(cfg, inp)
+        screen.close()
+        return 0
+
     bot = FishingBot(cfg=cfg, inp=inp, screen=screen, debug=args.debug)
 
     _install_hotkeys(bot.stop)

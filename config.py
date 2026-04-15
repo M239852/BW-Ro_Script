@@ -45,6 +45,13 @@ class Config:
     # click. Too short and you click before the fish has fully committed, and
     # it slips off the hook. Typical working range: 250-600 ms.
     retrieve_delay_ms: int = 350
+    # Explicit mouse-button hold time for click(). A ~1 ms click (the default
+    # for pydirectinput.click()) is sometimes dropped by Roblox; 40-80 ms is
+    # reliable without feeling sluggish.
+    click_hold_ms: int = 50
+    # Window title substring to force-focus before sending cast/retrieve
+    # clicks. Set to "" or null to disable.
+    focus_window_title: Optional[str] = "Roblox"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -78,6 +85,8 @@ class Config:
             bobber_edge_min=float(d.get("bobber_edge_min", 8.0)),
             max_recast_attempts=int(d.get("max_recast_attempts", 4)),
             retrieve_delay_ms=int(d.get("retrieve_delay_ms", 350)),
+            click_hold_ms=int(d.get("click_hold_ms", 50)),
+            focus_window_title=d.get("focus_window_title", "Roblox"),
         )
 
 

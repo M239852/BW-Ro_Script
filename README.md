@@ -111,6 +111,23 @@ Everything is in `config.json`:
 | `cast_key` / `chest_key` | key names passed to pydirectinput | `1` / `e` |
 | `retrieve_point` / `retrieve_key` | optional — action to "hook" the fish when bobber sinks. Defaults to the cast action (same button casts and hooks in most Roblox fishing games). | `null` |
 | `retrieve_delay_ms` | wait after detecting the bobber sink before firing the retrieve click, so the fish has time to fully commit to the bobber. Raise if fish keep slipping the hook, lower if you're watching prompts time out. Typical working range 250–600. | `350` |
+| `click_hold_ms` | mouse-button hold time for cast/retrieve clicks. Roblox drops very short clicks — 40–80 ms is reliable. | `50` |
+| `focus_window_title` | substring of the game window title to force-focus before each cast/retrieve so mis-focused clicks don't vanish. Set to `""` to disable. | `"Roblox"` |
+
+## Troubleshooting input
+
+If the bot transitions through `CASTING -> WAITING_SINK` but you don't actually see the rod cast in-game (or the retrieve click never fires when the bobber sinks), run the diagnostic mode:
+
+```
+python main.py --test-input
+```
+
+It fires cast → wait 3 s → retrieve three times with no sink detection. Watch Roblox and console output. Common failure modes:
+
+- **`WARN could not focus window containing 'Roblox'`** — the game window title doesn't contain "Roblox" (uncommon, but happens in web-player builds). Edit `focus_window_title` in `config.json` to match whatever your Roblox window is actually called.
+- **`WARN cursor at (X,Y) not (A,B)`** — the OS isn't moving the cursor to where you asked. Usually means Windows DPI scaling isn't matching what `mss` captured during calibration. Re-run `python main.py --calibrate` after making sure Roblox and Windows are both at 100% display scaling.
+- **Cursor moves to the right place but nothing happens in-game** — the click is being dropped. Raise `click_hold_ms` to 80 or 100.
+- **Cursor doesn't move at all and no warnings** — focus_window_title is disabled/unmatched and another window is intercepting. Make sure Roblox is actually visible and un-minimized.
 
 **Tuning with `--debug`.** In debug mode the bot prints:
 - `bobber edge var=XX.X` right after each cast — if this is consistently below `bobber_edge_min` even when a bobber is visible, lower `bobber_edge_min` to match.
