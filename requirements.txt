@@ -3,3 +3,4 @@ numpy>=1.26
 opencv-python>=4.9
 pydirectinput>=1.0.4
 keyboard>=0.13.5
+pillow>=10.0
