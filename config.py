@@ -42,11 +42,11 @@ class Config:
     # Max consecutive cast attempts that land no bobber before a longer RECOVER pause.
     max_recast_attempts: int = 4
     # Reaction delay between detecting a strike and firing the retrieve click.
-    # With splash-based detection we're already at peak bite time — the old
-    # 350 ms default was tuned for the old dip-based detection and now makes
-    # the bot click *after* the fish has left. Default 60 ms; raise toward
-    # 150-250 only if fish actually slip the hook in your game.
-    retrieve_delay_ms: int = 60
+    # The bobber-lost detector already waits `bobber_lost_ms` for a sustained
+    # drop before firing, so by the time a strike is declared we're already
+    # well into the bite window. Default 0; raise toward 100-200 only if the
+    # game needs an extra beat before the click registers.
+    retrieve_delay_ms: int = 0
     # Explicit mouse-button hold time for click(). A ~1 ms click (the default
     # for pydirectinput.click()) is sometimes dropped by Roblox; 40-80 ms is
     # reliable without feeling sluggish.
@@ -81,6 +81,14 @@ class Config:
     #     home position at which we call a strike. Rain doesn't move the
     #     bobber; a bite does. 6 px is usually enough.
     bobber_pos_shift: int = 6
+    #   bobber_lost_ms: the drop must be SUSTAINED for this many milliseconds
+    #     before a strike fires. Ambient daytime splashes cover the bobber
+    #     for ~150-300 ms and then clear; a real bite pulls the bobber
+    #     underwater for multiple seconds. 400 ms is a conservative midpoint
+    #     that ignores ambient effects while still firing well within the
+    #     game's bite-response window. Raise if ambient splashes still
+    #     trigger; lower if real bites are being rejected as transient.
+    bobber_lost_ms: int = 400
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -121,6 +129,7 @@ class Config:
             strike_edge_min=float(d.get("strike_edge_min", 25.0)),
             bobber_score_drop=float(d.get("bobber_score_drop", 0.35)),
             bobber_pos_shift=int(d.get("bobber_pos_shift", 6)),
+            bobber_lost_ms=int(d.get("bobber_lost_ms", 400)),
         )
 
 

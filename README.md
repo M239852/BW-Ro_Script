@@ -102,8 +102,9 @@ Everything is in `config.json`:
 
 | key | meaning | default |
 |---|---|---|
-| `bobber_score_drop` | **The only strike signal.** At cast-settle a template is cut from the center of `bobber_region`; each frame the bot re-finds it via `matchTemplate`. When the best match score drops by this much vs the rest score for 2 consecutive frames, the bobber is considered obscured / submerged → strike. Weather-proof because rain, wind, and ambient daytime splashes happen around the bobber without displacing the template. Raise if false-triggers, lower if real bites are missed. | `0.35` |
-| `bobber_pos_shift` | Manhattan pixel distance from the bobber's cast-time home position at which we call a strike. A fish pulling the bobber sideways registers here even if the match score stays high. | `6` |
+| `bobber_score_drop` | Template match score drop (vs cast-time rest score) that counts as "bobber lost" this frame. Raise if ambient effects partially obscure the bobber, lower if real bites don't drop the score enough. | `0.35` |
+| `bobber_pos_shift` | Manhattan pixel distance from the bobber's cast-time home at which this frame counts as "bobber shifted". | `6` |
+| `bobber_lost_ms` | **The most important knob.** The score drop or position shift must be *sustained* for this many milliseconds before a strike fires. Ambient daytime splashes briefly cover the bobber for ~150-300 ms and then clear — they never reach this threshold. A real bite pulls the bobber underwater for multiple seconds so it blows through it easily. Raise if ambient splashes still trigger; lower if real bites are being rejected as transient. | `400` |
 | `sink_threshold` | mean pixel delta on bobber region for the fallback detector used only when the bobber template cannot be built at cast time. | `18.0` |
 | `splash_min` | retained in config for back-compat but **no longer used** as a strike signal — ambient daytime splashes produced too many false triggers. The bobber tracker catches real bites in all weather. | `0.02` |
 | `strike_edge_min` | retained in config for back-compat but **no longer used** as a strike signal. | `25.0` |
@@ -115,7 +116,7 @@ Everything is in `config.json`:
 | `hold_ms` | keydown hold time in ms | `60` |
 | `cast_key` / `chest_key` | key names passed to pydirectinput | `1` / `e` |
 | `retrieve_point` / `retrieve_key` | optional — action to "hook" the fish when bobber sinks. Defaults to the cast action (same button casts and hooks in most Roblox fishing games). | `null` |
-| `retrieve_delay_ms` | wait after detecting a strike before firing the retrieve click. With splash-based detection the strike fires at peak bite time, so this should be small. **Raise toward 150–250 only if fish are actually slipping the hook** (you see a strike detect + click but no chest). | `60` |
+| `retrieve_delay_ms` | wait after detecting a strike before firing the retrieve click. The bobber-lost detector already waits `bobber_lost_ms` for a sustained drop so by the time a strike fires we're already well into the bite window. Default `0`; raise toward 100–200 only if the game needs an extra beat before the click registers. | `0` |
 | `click_hold_ms` | mouse-button hold time for cast/retrieve clicks. Roblox drops very short clicks — 40–80 ms is reliable. | `50` |
 | `focus_window_title` | substring of the game window title to force-focus before each cast/retrieve so mis-focused clicks don't vanish. Set to `""` to disable. | `"Roblox"` |
 

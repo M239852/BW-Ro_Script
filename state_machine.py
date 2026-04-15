@@ -72,6 +72,12 @@ class FishingBot:
         self._bobber_template: Optional[np.ndarray] = None
         self._bobber_home: tuple[int, int] = (0, 0)
         self._bobber_score_rest: float = 0.0
+        # Timestamp at which the current sustained score-drop / position-shift
+        # started. 0 means "not currently dropped". We fire a strike only when
+        # the drop has persisted continuously for >= bobber_lost_ms, which
+        # distinguishes real bites (bobber stays underwater for seconds) from
+        # ambient splashes (cover the bobber for < 400 ms and dissipate).
+        self._drop_start_t: float = 0.0
         self._cast_t: float = 0.0
         self._state_t: float = 0.0
         self._last_letter: Optional[str] = None
@@ -124,6 +130,7 @@ class FishingBot:
         self._last_letter = None
         self._last_letter_t = 0.0
         self._last_green_frac = 0.0
+        self._drop_start_t = 0.0
         if new_state == State.WAITING_SINK:
             self._strike_history = []
 
@@ -322,13 +329,12 @@ class FishingBot:
         # is seeing, which is critical for tuning the strike thresholds.
         if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
             self._last_heartbeat = now
+            drop_ms = int((now - self._drop_start_t) * 1000) if self._drop_start_t else 0
             print(
                 f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
                 f"bobber={bscore:.2f} drop={score_drop:.2f}/{self.cfg.bobber_score_drop:.2f} "
                 f"shift={pos_shift}/{self.cfg.bobber_pos_shift}  "
-                f"splash={splash_frac*100:4.1f}%/{self.cfg.splash_min*100:.1f}%  "
-                f"edgeD={edge_delta:6.1f}/{self.cfg.strike_edge_min:.1f}  "
-                f"m={mdelta:4.1f}  hits={self._sink_hits}"
+                f"held={drop_ms:4d}/{self.cfg.bobber_lost_ms}ms"
             )
 
         since_cast = now - self._cast_t
@@ -347,41 +353,60 @@ class FishingBot:
             # Template couldn't be built at cast-settle; we have no reliable
             # signal. Fall back to the old delta/vdrop detection so the bot
             # isn't stuck forever — this path is a degraded last resort.
-            if delta > self.cfg.sink_threshold or vdrop > 12:
-                self._sink_hits += 1
+            fb_dropped = delta > self.cfg.sink_threshold or vdrop > 12
+            if fb_dropped:
+                if self._drop_start_t == 0.0:
+                    self._drop_start_t = now
+                if (now - self._drop_start_t) * 1000.0 >= self.cfg.bobber_lost_ms:
+                    if self.debug:
+                        print(
+                            f"[bot] STRIKE (FALLBACK) delta={delta:.1f} "
+                            f"vdrop={vdrop:.1f}  (no bobber template)"
+                        )
+                        self._dump_strike_history("FALLBACK")
+                    self._enter(State.RETRIEVING)
             else:
-                self._sink_hits = max(0, self._sink_hits - 1)
-            if self._sink_hits >= 2:
-                if self.debug:
-                    print(
-                        f"[bot] STRIKE (FALLBACK) delta={delta:.1f} "
-                        f"vdrop={vdrop:.1f}  (no bobber template)"
-                    )
-                    self._dump_strike_history("FALLBACK")
-                self._enter(State.RETRIEVING)
+                self._drop_start_t = 0.0
             return
 
-        if score_drop >= self.cfg.bobber_score_drop:
-            self._sink_hits += 1
-        elif pos_shift >= self.cfg.bobber_pos_shift:
-            self._sink_hits += 1
+        # Sustained-drop timer. The bobber is "dropped" this frame if the
+        # template score dropped OR the match location shifted. We start a
+        # timer the first frame that happens, and only fire a strike once
+        # the drop has persisted continuously for >= bobber_lost_ms.
+        #
+        # An ambient daytime splash covers the bobber for ~150-300 ms and
+        # then clears — the timer resets before it ever reaches threshold.
+        # A real bite pulls the bobber underwater for multiple seconds, so
+        # the timer blows right through the threshold.
+        dropped_now = (
+            score_drop >= self.cfg.bobber_score_drop
+            or pos_shift >= self.cfg.bobber_pos_shift
+        )
+        if dropped_now:
+            if self._drop_start_t == 0.0:
+                self._drop_start_t = now
+            drop_ms = (now - self._drop_start_t) * 1000.0
+            if drop_ms >= self.cfg.bobber_lost_ms:
+                if score_drop >= self.cfg.bobber_score_drop:
+                    reason = "BOBBER_LOST"
+                    msg = (
+                        f"score={bscore:.2f} drop={score_drop:.2f} "
+                        f"held {drop_ms:.0f}ms"
+                    )
+                else:
+                    reason = "BOBBER_SHIFT"
+                    msg = (
+                        f"shift={pos_shift} from={self._bobber_home} "
+                        f"to={bloc} held {drop_ms:.0f}ms"
+                    )
+                if self.debug:
+                    print(f"[bot] STRIKE ({reason}) {msg}")
+                    self._dump_strike_history(reason)
+                self._enter(State.RETRIEVING)
         else:
-            self._sink_hits = max(0, self._sink_hits - 1)
-
-        # Require 2 consecutive tracker hits before firing, so a single
-        # flickered frame (occlusion by a raindrop, one-frame particle
-        # overlap) can't trigger a false strike.
-        if self._sink_hits >= 2:
-            if score_drop >= self.cfg.bobber_score_drop:
-                reason = "BOBBER_LOST"
-                msg = f"score={bscore:.2f} drop={score_drop:.2f}"
-            else:
-                reason = "BOBBER_SHIFT"
-                msg = f"shift={pos_shift} from={self._bobber_home} to={bloc}"
-            if self.debug:
-                print(f"[bot] STRIKE ({reason}) {msg}")
-                self._dump_strike_history(reason)
-            self._enter(State.RETRIEVING)
+            # Bobber recovered (e.g. ambient splash dissipated). Reset the
+            # timer — the next drop has to build up its own sustained window.
+            self._drop_start_t = 0.0
 
     # -- RETRIEVING
     def _handle_retrieving(self) -> None:
