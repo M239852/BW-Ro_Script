@@ -81,14 +81,16 @@ class Config:
     #     home position at which we call a strike. Rain doesn't move the
     #     bobber; a bite does. 6 px is usually enough.
     bobber_pos_shift: int = 6
-    #   bobber_lost_ms: the drop must be SUSTAINED for this many milliseconds
-    #     before a strike fires. Ambient daytime splashes cover the bobber
-    #     for ~150-300 ms and then clear; a real bite pulls the bobber
-    #     underwater for multiple seconds. 400 ms is a conservative midpoint
-    #     that ignores ambient effects while still firing well within the
-    #     game's bite-response window. Raise if ambient splashes still
-    #     trigger; lower if real bites are being rejected as transient.
-    bobber_lost_ms: int = 400
+    #   bobber_lost_ms: rolling-window size in milliseconds. A strike fires
+    #     when >=80% of the last bobber_lost_ms of frames had BOTH a score
+    #     crater AND a position shift. Rain/ambient splashes cover the
+    #     bobber for ~150-300 ms and leave clean frames between them, so
+    #     their rolling fraction stays well below 80%. A real bite pulls
+    #     the bobber under for multiple seconds so the fraction hits ~100%
+    #     in one window. 600 ms is a conservative midpoint — raise toward
+    #     800-1000 if rain/weather still trigger, lower toward 400 if real
+    #     bites are being rejected.
+    bobber_lost_ms: int = 600
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -129,7 +131,7 @@ class Config:
             strike_edge_min=float(d.get("strike_edge_min", 25.0)),
             bobber_score_drop=float(d.get("bobber_score_drop", 0.35)),
             bobber_pos_shift=int(d.get("bobber_pos_shift", 6)),
-            bobber_lost_ms=int(d.get("bobber_lost_ms", 400)),
+            bobber_lost_ms=int(d.get("bobber_lost_ms", 600)),
         )
 
 

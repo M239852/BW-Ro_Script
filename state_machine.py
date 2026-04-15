@@ -32,6 +32,19 @@ SINK_TIMEOUT_S = 20.0
 MINIGAME_MAX_S = 45.0
 LETTER_DEBOUNCE_S = 0.08
 
+# Rolling-window strike detector: fraction of the last bobber_lost_ms
+# milliseconds of frames that must be "dropped" (score crater + position
+# shift) before we fire a strike. 0.80 means 80% of the window has to show
+# the bobber obscured/moved. Rain drops are sparse in time — even heavy
+# rain rarely pushes this above 0.3 because most frames still see the
+# bobber clearly pinned at home. A real underwater bite ramps it to 1.0
+# within one window.
+DROP_WINDOW_FRAC = 0.80
+# Minimum samples we need in the window before we're willing to fire.
+# Prevents an immediate strike on the very first post-lockout frame if
+# the window happens to start with a transient dip.
+DROP_WINDOW_MIN_SAMPLES = 8
+
 # Post-cast settle: we used to wait a fixed 1.8 s for the bobber to land,
 # but the initial cast-impact splash on the water is large and can still
 # be dissipating after 2+ seconds. A fixed wait either cuts off the splash
@@ -80,11 +93,23 @@ class FishingBot:
         self._bobber_template: Optional[np.ndarray] = None
         self._bobber_home: tuple[int, int] = (0, 0)
         self._bobber_score_rest: float = 0.0
-        # Timestamp at which the current sustained score-drop / position-shift
-        # started. 0 means "not currently dropped". We fire a strike only when
-        # the drop has persisted continuously for >= bobber_lost_ms, which
-        # distinguishes real bites (bobber stays underwater for seconds) from
-        # ambient splashes (cover the bobber for < 400 ms and dissipate).
+        # Rolling window of (timestamp, dropped_this_frame) flags over the
+        # last bobber_lost_ms milliseconds. We fire a strike only when the
+        # fraction of "dropped" frames inside the window exceeds
+        # DROP_WINDOW_FRAC — i.e. the bobber has been obscured/moved for
+        # *most* of the window, not just intermittently.
+        #
+        # Why a rolling fraction and not a consecutive-time timer? Rain
+        # creates bursts of score noise and small position jitter that can
+        # make a consecutive timer creep toward threshold — each individual
+        # rain drop covers the bobber briefly, and if they come close enough
+        # together, the timer never gets a clean reset frame between them.
+        # A fraction-over-window ignores isolated drops: even in heavy rain,
+        # most frames still see the bobber clearly pinned at home, so the
+        # drop fraction stays well below DROP_WINDOW_FRAC. A real underwater
+        # bite fills the window to ~100% within bobber_lost_ms.
+        self._drop_flags: list[tuple[float, bool]] = []
+        # kept for fallback (no template) path only
         self._drop_start_t: float = 0.0
         self._cast_t: float = 0.0
         self._state_t: float = 0.0
@@ -139,6 +164,7 @@ class FishingBot:
         self._last_letter_t = 0.0
         self._last_green_frac = 0.0
         self._drop_start_t = 0.0
+        self._drop_flags = []
         if new_state == State.WAITING_SINK:
             self._strike_history = []
 
@@ -364,16 +390,26 @@ class FishingBot:
         if len(self._strike_history) > 40:
             self._strike_history.pop(0)
 
+        # Drop fraction over rolling window (computed below for strike
+        # decision too). We prune + count here so the heartbeat shows the
+        # live fraction the strike detector is actually using.
+        window_start = now - (self.cfg.bobber_lost_ms / 1000.0)
+        self._drop_flags = [(t, d) for (t, d) in self._drop_flags if t >= window_start]
+        if self._drop_flags:
+            drop_frac_live = sum(1 for (_, d) in self._drop_flags if d) / len(self._drop_flags)
+        else:
+            drop_frac_live = 0.0
+
         # Heartbeat log — lets the user see the bot is alive and what values it
         # is seeing, which is critical for tuning the strike thresholds.
         if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
             self._last_heartbeat = now
-            drop_ms = int((now - self._drop_start_t) * 1000) if self._drop_start_t else 0
             print(
                 f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
                 f"bobber={bscore:.2f} drop={score_drop:.2f}/{self.cfg.bobber_score_drop:.2f} "
                 f"shift={pos_shift}/{self.cfg.bobber_pos_shift}  "
-                f"held={drop_ms:4d}/{self.cfg.bobber_lost_ms}ms"
+                f"wfrac={drop_frac_live*100:3.0f}%/{DROP_WINDOW_FRAC*100:.0f}% "
+                f"(n={len(self._drop_flags)})"
             )
 
         since_cast = now - self._cast_t
@@ -408,44 +444,55 @@ class FishingBot:
                 self._drop_start_t = 0.0
             return
 
-        # Sustained-drop timer. The bobber is "dropped" this frame if the
-        # template score dropped OR the match location shifted. We start a
-        # timer the first frame that happens, and only fire a strike once
-        # the drop has persisted continuously for >= bobber_lost_ms.
+        # Rolling-window strike detector. A frame is "dropped" only if BOTH
+        # the template score has cratered AND the best-match location has
+        # shifted away from home. Using AND (not OR) is the critical guard
+        # against weather noise:
         #
-        # An ambient daytime splash covers the bobber for ~150-300 ms and
-        # then clears — the timer resets before it ever reaches threshold.
-        # A real bite pulls the bobber underwater for multiple seconds, so
-        # the timer blows right through the threshold.
+        #   * Rain drop hits the water near the bobber -> might jitter the
+        #     match score a little, might jitter the best-match pixel
+        #     location a little, but almost never both at once on the same
+        #     frame. AND rejects these.
+        #   * Real fish bite pulls the bobber straight underwater -> the
+        #     template is no longer findable at all, so cv2.matchTemplate
+        #     falls back to the best random-noise match somewhere in the
+        #     region. That gives low score AND shifted location at the
+        #     same time, and it stays that way for seconds.
+        #
+        # We then require that a high fraction (DROP_WINDOW_FRAC) of the
+        # last bobber_lost_ms milliseconds of frames were dropped. Rain
+        # produces isolated dropped frames scattered among clean frames,
+        # so the fraction stays well below threshold. A bite produces an
+        # unbroken run of dropped frames, so the fraction hits ~1.0 within
+        # one window.
         dropped_now = (
             score_drop >= self.cfg.bobber_score_drop
-            or pos_shift >= self.cfg.bobber_pos_shift
+            and pos_shift >= self.cfg.bobber_pos_shift
         )
-        if dropped_now:
-            if self._drop_start_t == 0.0:
-                self._drop_start_t = now
-            drop_ms = (now - self._drop_start_t) * 1000.0
-            if drop_ms >= self.cfg.bobber_lost_ms:
-                if score_drop >= self.cfg.bobber_score_drop:
-                    reason = "BOBBER_LOST"
-                    msg = (
-                        f"score={bscore:.2f} drop={score_drop:.2f} "
-                        f"held {drop_ms:.0f}ms"
-                    )
-                else:
-                    reason = "BOBBER_SHIFT"
-                    msg = (
-                        f"shift={pos_shift} from={self._bobber_home} "
-                        f"to={bloc} held {drop_ms:.0f}ms"
-                    )
-                if self.debug:
-                    print(f"[bot] STRIKE ({reason}) {msg}")
-                    self._dump_strike_history(reason)
-                self._enter(State.RETRIEVING)
-        else:
-            # Bobber recovered (e.g. ambient splash dissipated). Reset the
-            # timer — the next drop has to build up its own sustained window.
-            self._drop_start_t = 0.0
+        self._drop_flags.append((now, dropped_now))
+
+        drop_count = sum(1 for (_, d) in self._drop_flags if d)
+        drop_frac = drop_count / len(self._drop_flags) if self._drop_flags else 0.0
+        window_span_ms = (
+            (self._drop_flags[-1][0] - self._drop_flags[0][0]) * 1000.0
+            if len(self._drop_flags) >= 2 else 0.0
+        )
+
+        if (
+            len(self._drop_flags) >= DROP_WINDOW_MIN_SAMPLES
+            and window_span_ms >= self.cfg.bobber_lost_ms * 0.8
+            and drop_frac >= DROP_WINDOW_FRAC
+        ):
+            reason = "BOBBER_LOST"
+            if self.debug:
+                print(
+                    f"[bot] STRIKE ({reason}) score={bscore:.2f} "
+                    f"drop={score_drop:.2f} shift={pos_shift} "
+                    f"wfrac={drop_frac*100:.0f}% over {window_span_ms:.0f}ms "
+                    f"(n={len(self._drop_flags)})"
+                )
+                self._dump_strike_history(reason)
+            self._enter(State.RETRIEVING)
 
     # -- RETRIEVING
     def _handle_retrieving(self) -> None:
