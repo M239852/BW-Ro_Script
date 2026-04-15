@@ -335,78 +335,52 @@ class FishingBot:
         if since_cast < CAST_LOCKOUT_S:
             return
 
-        # === PRIMARY weather-resistant strike signal: bobber tracking ===
-        # The bobber itself only moves / vanishes when a fish hits — rain,
-        # wind, and weather effects don't displace it. Fire immediately on:
-        #   - a sharp drop in template match score (bobber obscured / gone)
-        #   - a position shift (bobber dipped or moved off-home)
-        # This is checked BEFORE the splash/edge signals because it's the
-        # one that survives bad weather.
-        if self._bobber_template is not None and self._bobber_score_rest > 0.5:
-            if score_drop >= self.cfg.bobber_score_drop:
-                if self.debug:
-                    print(
-                        f"[bot] STRIKE (BOBBER_LOST) score={bscore:.2f} "
-                        f"drop={score_drop:.2f}"
-                    )
-                    self._dump_strike_history("BOBBER_LOST")
-                self._enter(State.RETRIEVING)
-                return
-            if pos_shift >= self.cfg.bobber_pos_shift:
-                if self.debug:
-                    print(
-                        f"[bot] STRIKE (BOBBER_SHIFT) shift={pos_shift} "
-                        f"from={self._bobber_home} to={bloc}"
-                    )
-                    self._dump_strike_history("BOBBER_SHIFT")
-                self._enter(State.RETRIEVING)
-                return
-
-        # === Secondary signals (kept for clear-weather bites and as backup) ===
-        # Strong single-frame hit: fire immediately, no debounce. The cyan
-        # splash is often only bright for 1-3 frames before dissipating, so
-        # waiting for 2 consecutive hits on a weak signal misses real bites.
-        strong_edge = edge_delta >= self.cfg.strike_edge_min * 2
-        strong_splash = splash_frac >= self.cfg.splash_min * 2
-        strong_motion = mdelta >= 15
-        if strong_edge or strong_splash or strong_motion:
-            if strong_splash:
-                reason = "SPLASH"
-            elif strong_edge:
-                reason = "EDGE"
+        # === Bobber tracking is the ONLY strike signal ===
+        # The bobber itself only moves or vanishes when a fish hits. Rain,
+        # wind ripples, daytime ambient splashes, particle effects, etc. all
+        # happen around the bobber without displacing it, so the template
+        # match stays pinned to the bobber's home location at high score.
+        # Splash/edge/motion detectors were tried previously and produced
+        # too many false triggers on ambient daytime splashes — they are
+        # intentionally NOT used to fire strikes here.
+        if self._bobber_template is None or self._bobber_score_rest <= 0.5:
+            # Template couldn't be built at cast-settle; we have no reliable
+            # signal. Fall back to the old delta/vdrop detection so the bot
+            # isn't stuck forever — this path is a degraded last resort.
+            if delta > self.cfg.sink_threshold or vdrop > 12:
+                self._sink_hits += 1
             else:
-                reason = "MOTION"
-            if self.debug:
-                print(
-                    f"[bot] STRIKE ({reason}, single-frame) "
-                    f"edgeD={edge_delta:.1f} splash={splash_frac*100:.2f}% "
-                    f"m={mdelta:.1f}"
-                )
-                self._dump_strike_history(reason)
-            self._enter(State.RETRIEVING)
+                self._sink_hits = max(0, self._sink_hits - 1)
+            if self._sink_hits >= 2:
+                if self.debug:
+                    print(
+                        f"[bot] STRIKE (FALLBACK) delta={delta:.1f} "
+                        f"vdrop={vdrop:.1f}  (no bobber template)"
+                    )
+                    self._dump_strike_history("FALLBACK")
+                self._enter(State.RETRIEVING)
             return
 
-        # Weaker signals still use a 2-frame debounce to avoid false triggers.
-        weak_hit = (
-            delta > self.cfg.sink_threshold
-            or vdrop > 12
-            or splash_frac >= self.cfg.splash_min
-            or edge_delta >= self.cfg.strike_edge_min
-            or mdelta >= 6
-        )
-        if weak_hit:
+        if score_drop >= self.cfg.bobber_score_drop:
+            self._sink_hits += 1
+        elif pos_shift >= self.cfg.bobber_pos_shift:
             self._sink_hits += 1
         else:
             self._sink_hits = max(0, self._sink_hits - 1)
 
+        # Require 2 consecutive tracker hits before firing, so a single
+        # flickered frame (occlusion by a raindrop, one-frame particle
+        # overlap) can't trigger a false strike.
         if self._sink_hits >= 2:
+            if score_drop >= self.cfg.bobber_score_drop:
+                reason = "BOBBER_LOST"
+                msg = f"score={bscore:.2f} drop={score_drop:.2f}"
+            else:
+                reason = "BOBBER_SHIFT"
+                msg = f"shift={pos_shift} from={self._bobber_home} to={bloc}"
             if self.debug:
-                print(
-                    f"[bot] STRIKE (debounced) delta={delta:.1f} vdrop={vdrop:.1f} "
-                    f"splash={splash_frac*100:.2f}% edgeD={edge_delta:.1f} "
-                    f"m={mdelta:.1f}"
-                )
-                self._dump_strike_history("DEBOUNCED")
+                print(f"[bot] STRIKE ({reason}) {msg}")
+                self._dump_strike_history(reason)
             self._enter(State.RETRIEVING)
 
     # -- RETRIEVING

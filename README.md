@@ -102,11 +102,11 @@ Everything is in `config.json`:
 
 | key | meaning | default |
 |---|---|---|
-| `bobber_score_drop` | **Primary weather-resistant strike signal.** At cast-settle a template is cut from the center of `bobber_region`; each frame the bot re-finds it via `matchTemplate`. When the best match score drops by this much vs the rest score, the bobber is considered obscured / submerged → strike. Rain and ripples don't move the bobber itself, so this survives bad weather when splash/edge detection fails. Raise if false-triggers, lower if real bites are missed. | `0.35` |
+| `bobber_score_drop` | **The only strike signal.** At cast-settle a template is cut from the center of `bobber_region`; each frame the bot re-finds it via `matchTemplate`. When the best match score drops by this much vs the rest score for 2 consecutive frames, the bobber is considered obscured / submerged → strike. Weather-proof because rain, wind, and ambient daytime splashes happen around the bobber without displacing the template. Raise if false-triggers, lower if real bites are missed. | `0.35` |
 | `bobber_pos_shift` | Manhattan pixel distance from the bobber's cast-time home position at which we call a strike. A fish pulling the bobber sideways registers here even if the match score stays high. | `6` |
-| `sink_threshold` | mean pixel delta on bobber region to call "sink" (legacy fallback) | `18.0` |
-| `splash_min` | fraction of bright + saturated pixels in the bobber region at which we call a strike. Hue-agnostic — catches cyan/teal Bridger Western splashes, red/orange trails, anything colorful against dark water. A single frame crossing `splash_min * 2` fires a strike with **no** debounce so brief splashes are never missed. Secondary signal — used when the bobber tracker hasn't fired yet. | `0.02` |
-| `strike_edge_min` | Laplacian-variance increase over the quiet-water baseline at which we call a strike. The splash ring adds structural edges that weren't there when the water was calm. Secondary signal. | `25.0` |
+| `sink_threshold` | mean pixel delta on bobber region for the fallback detector used only when the bobber template cannot be built at cast time. | `18.0` |
+| `splash_min` | retained in config for back-compat but **no longer used** as a strike signal — ambient daytime splashes produced too many false triggers. The bobber tracker catches real bites in all weather. | `0.02` |
+| `strike_edge_min` | retained in config for back-compat but **no longer used** as a strike signal. | `25.0` |
 | `red_trail_min` | (legacy) fraction of red/orange-only pixels. Unused in detection unless your game actually uses a red trail — kept for backwards compatibility. | `0.005` |
 | `bobber_edge_min` | Laplacian edge variance below which "no bobber visible" (empty water) | `8.0` |
 | `max_recast_attempts` | consecutive cast misses before a longer RECOVER pause | `4` |
