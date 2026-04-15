@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 config.json
 debug/
+# Generated locally from each user's Windows font — don't commit rendered templates.
+templates/*.png
 templates/unknown/
 .venv/
 venv/

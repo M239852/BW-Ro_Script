@@ -31,13 +31,40 @@ Then you're prompted for the cast key (default `1`) and chest collect key (defau
 
 ## Build the letter templates (one-time)
 
-The recognizer uses OpenCV template matching. The first time, let it learn each letter:
+The recognizer uses OpenCV template matching, so you need a `templates/A.png` … `templates/Z.png` file set. There are two ways to build them. **Do option A first — it's one command — and only fall back to option B for letters that don't match at runtime.**
+
+### A. Generate from a font (fast — one command)
+
+Bridger Western's minigame letters render in a Roman serif capital (looks like **Trajan Pro** or similar). If you already have Trajan Pro or Cinzel on your system the generator will find them automatically; otherwise it falls back to Times New Roman Bold, which is close enough in most cases:
+
+```
+python generate_templates.py
+```
+
+Or point it at a specific font:
+
+```
+python generate_templates.py --font "C:/Windows/Fonts/trajanpro-bold.otf" --overwrite
+python generate_templates.py --font "C:/Windows/Fonts/timesbd.ttf" --overwrite
+```
+
+The generator renders each letter at high resolution, runs it through the **exact** preprocessing pipeline the recognizer uses, and writes 48×48 binary PNGs to `templates/`. You can re-render specific letters later:
+
+```
+python generate_templates.py --only GT --overwrite
+```
+
+### B. Capture from the live game (fallback for mismatched letters)
+
+If any generated letter scores consistently below 0.85 at runtime (visible in `--debug`), replace just that letter with a real in-game crop:
 
 ```
 python main.py --capture-templates
 ```
 
-Cast your rod, play the minigame normally; when a new prompt appears the script crops it, you type the real letter, and it saves `templates/A.png`, `templates/B.png`, ... Repeat across several rounds until all 26 letters are collected (or enough — you can add more later on-the-fly).
+Cast your rod, play normally; when a new prompt appears the script crops it, you type the real letter, and it saves `templates/<LETTER>.png`. You can stop any time with `q` — partial coverage is fine because generated templates fill the rest.
+
+> **Tight calibration is critical.** The in-game letter sits on a dark circular button, surrounded by bright scenery (ground, chest). When you calibrate `letter_region`, **drag the box tightly around the dark circle only** — don't include the bright surroundings. If the captured region has more bright pixels than dark ones, Otsu thresholding will invert and pick the wrong contour.
 
 ## Run the bot
 
@@ -93,14 +120,15 @@ If the bot casts but nothing happens, the issue is almost always `bobber_edge_mi
 ## File layout
 
 ```
-main.py           # entry point, CLI, hotkeys, DPI aware
-config.py         # Config dataclass + config.json IO
-calibrate.py      # tkinter overlay for drag-select calibration
-vision.py         # screen capture + letter/sink/progress detection
-input_driver.py   # pydirectinput wrapper, dry-run aware
-state_machine.py  # FishingBot: CASTING -> WAITING_SINK -> RETRIEVING -> MINIGAME -> CHEST/RECOVER
-templates/        # A.png..Z.png learned by --capture-templates
-config.json       # calibration output (created on first run)
+main.py               # entry point, CLI, hotkeys, DPI aware
+config.py             # Config dataclass + config.json IO
+calibrate.py          # tkinter overlay for drag-select calibration
+vision.py             # screen capture + letter/sink/progress detection
+input_driver.py       # pydirectinput wrapper, dry-run aware
+state_machine.py      # FishingBot: CASTING -> WAITING_SINK -> RETRIEVING -> MINIGAME -> CHEST/RECOVER
+generate_templates.py # render A-Z from a TTF/OTF font through the recognizer pipeline
+templates/            # A.png..Z.png (generated locally — not in git)
+config.json           # calibration output (created on first run)
 ```
 
 ## Offline self-test
