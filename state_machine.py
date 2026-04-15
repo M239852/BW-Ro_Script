@@ -65,6 +65,13 @@ class FishingBot:
 
         # per-state scratch
         self._baseline_bobber: Optional[np.ndarray] = None
+        # Bobber tracking template (small grayscale crop from the center of
+        # the baseline region). We find this each frame during WAITING_SINK
+        # and watch its match score + position. Weather-resistant bite
+        # signal because rain/ripples don't move the bobber itself.
+        self._bobber_template: Optional[np.ndarray] = None
+        self._bobber_home: tuple[int, int] = (0, 0)
+        self._bobber_score_rest: float = 0.0
         self._cast_t: float = 0.0
         self._state_t: float = 0.0
         self._last_letter: Optional[str] = None
@@ -240,6 +247,20 @@ class FishingBot:
         # settle frames so natural ripples don't look like a sink.
         tail = frames[-3:] if len(frames) >= 3 else frames
         self._baseline_bobber = np.mean(np.stack(tail).astype(np.float32), axis=0).astype(np.uint8)
+        # Build the bobber tracking template from the center of the baseline
+        # and snapshot its rest-state score/position. During WAITING_SINK we
+        # will look for sharp drops in score or shifts in position as the
+        # weather-resistant bite signal.
+        self._bobber_template = vision.extract_bobber_template(self._baseline_bobber)
+        if self._bobber_template is not None:
+            score, loc = vision.track_bobber(self._baseline_bobber, self._bobber_template)
+            self._bobber_home = loc
+            self._bobber_score_rest = score
+            if self.debug:
+                print(
+                    f"[bot] bobber template {self._bobber_template.shape} "
+                    f"rest score={score:.2f} home={loc}"
+                )
         self._cast_attempts = 0
         self._enter(State.WAITING_SINK)
 
@@ -273,6 +294,18 @@ class FishingBot:
             mdelta = vision.frame_delta(prev_frame, curr)
         else:
             mdelta = 0.0
+        # Weather-resistant bobber tracking: find the cast-time bobber
+        # template in the current frame. When the fish bites, the bobber
+        # dips / is obscured by splash / moves — all of which drop the
+        # match score or shift the location. Rain and ripples don't move
+        # the bobber, so this signal stays near 1.0 in bad weather.
+        bscore, bloc = 0.0, self._bobber_home
+        score_drop = 0.0
+        pos_shift = 0
+        if self._bobber_template is not None:
+            bscore, bloc = vision.track_bobber(curr, self._bobber_template)
+            score_drop = self._bobber_score_rest - bscore
+            pos_shift = abs(bloc[0] - self._bobber_home[0]) + abs(bloc[1] - self._bobber_home[1])
 
         # Maintain a rolling ~1.5 s buffer of frames + signals for strike dumps.
         now = time.perf_counter()
@@ -291,8 +324,8 @@ class FishingBot:
             self._last_heartbeat = now
             print(
                 f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
-                f"delta={delta:5.1f}/{self.cfg.sink_threshold:.1f}  "
-                f"vdrop={vdrop:5.1f}  "
+                f"bobber={bscore:.2f} drop={score_drop:.2f}/{self.cfg.bobber_score_drop:.2f} "
+                f"shift={pos_shift}/{self.cfg.bobber_pos_shift}  "
                 f"splash={splash_frac*100:4.1f}%/{self.cfg.splash_min*100:.1f}%  "
                 f"edgeD={edge_delta:6.1f}/{self.cfg.strike_edge_min:.1f}  "
                 f"m={mdelta:4.1f}  hits={self._sink_hits}"
@@ -302,6 +335,34 @@ class FishingBot:
         if since_cast < CAST_LOCKOUT_S:
             return
 
+        # === PRIMARY weather-resistant strike signal: bobber tracking ===
+        # The bobber itself only moves / vanishes when a fish hits — rain,
+        # wind, and weather effects don't displace it. Fire immediately on:
+        #   - a sharp drop in template match score (bobber obscured / gone)
+        #   - a position shift (bobber dipped or moved off-home)
+        # This is checked BEFORE the splash/edge signals because it's the
+        # one that survives bad weather.
+        if self._bobber_template is not None and self._bobber_score_rest > 0.5:
+            if score_drop >= self.cfg.bobber_score_drop:
+                if self.debug:
+                    print(
+                        f"[bot] STRIKE (BOBBER_LOST) score={bscore:.2f} "
+                        f"drop={score_drop:.2f}"
+                    )
+                    self._dump_strike_history("BOBBER_LOST")
+                self._enter(State.RETRIEVING)
+                return
+            if pos_shift >= self.cfg.bobber_pos_shift:
+                if self.debug:
+                    print(
+                        f"[bot] STRIKE (BOBBER_SHIFT) shift={pos_shift} "
+                        f"from={self._bobber_home} to={bloc}"
+                    )
+                    self._dump_strike_history("BOBBER_SHIFT")
+                self._enter(State.RETRIEVING)
+                return
+
+        # === Secondary signals (kept for clear-weather bites and as backup) ===
         # Strong single-frame hit: fire immediately, no debounce. The cyan
         # splash is often only bright for 1-3 frames before dissipating, so
         # waiting for 2 consecutive hits on a weak signal misses real bites.

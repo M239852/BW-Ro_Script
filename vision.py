@@ -121,6 +121,58 @@ def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
     return bobber_edge_variance(curr) - bobber_edge_variance(baseline)
 
 
+def extract_bobber_template(baseline: np.ndarray) -> Optional[np.ndarray]:
+    """Cut a small window from the center of the bobber_region baseline to
+    use as a tracking template. The region is assumed to be calibrated so
+    that the bobber sits roughly in the middle — we take a 40%-sized central
+    crop, which is almost guaranteed to contain the bobber and little else.
+
+    Returns a grayscale template, or None if the baseline is unusable.
+    """
+    if baseline is None or baseline.size == 0:
+        return None
+    gray = cv2.cvtColor(baseline, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    if h < 8 or w < 8:
+        return None
+    ch = max(6, int(h * 0.4))
+    cw = max(6, int(w * 0.4))
+    y0 = (h - ch) // 2
+    x0 = (w - cw) // 2
+    return gray[y0:y0 + ch, x0:x0 + cw].copy()
+
+
+def track_bobber(
+    curr: np.ndarray,
+    template: np.ndarray,
+) -> tuple[float, tuple[int, int]]:
+    """Find the best match of `template` inside `curr`, weather-resistant.
+
+    Returns (score, (x, y)) where score is TM_CCOEFF_NORMED in [-1, 1] and
+    (x, y) is the top-left of the best match inside `curr` (grayscale coords).
+    Falls back to (0.0, (0, 0)) on any failure.
+
+    The bite signal is derived from this:
+      - Bobber at rest: score ~0.95+, position stable
+      - Fish bites (bobber dips underwater, ripples hide it, splash covers
+        it): score drops sharply — often below 0.6 within one frame
+      - Weather noise (rain, wind ripples): barely moves the score because
+        the bobber itself is still the best match in the region
+    """
+    if curr is None or curr.size == 0 or template is None or template.size == 0:
+        return 0.0, (0, 0)
+    gray = cv2.cvtColor(curr, cv2.COLOR_BGR2GRAY)
+    th, tw = template.shape[:2]
+    if gray.shape[0] < th or gray.shape[1] < tw:
+        return 0.0, (0, 0)
+    try:
+        res = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        return float(max_val), (int(max_loc[0]), int(max_loc[1]))
+    except cv2.error:
+        return 0.0, (0, 0)
+
+
 def annotate_red_mask(img: np.ndarray) -> np.ndarray:
     """Return a BGR image with the bright-splash mask overlaid in bright
     magenta, so the user can visually verify what the splash detector sees."""

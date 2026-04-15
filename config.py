@@ -68,6 +68,19 @@ class Config:
     # there when the water was quiet). A single frame crossing 2x this fires
     # a strike with no debounce.
     strike_edge_min: float = 25.0
+    # Weather-resistant bobber tracking. At cast-settle a small template is
+    # cut from the center of the bobber region; each frame during WAITING_SINK
+    # we rerun matchTemplate and compare. A bite drops the match score
+    # sharply (bobber dipped / obscured) or shifts its position.
+    #   bobber_score_drop: drop from rest score at which we call a strike.
+    #     Rest is typically ~0.95+, bite typically drops to <0.5. A drop of
+    #     0.35 is conservative — raise if false-triggers on weather, lower
+    #     if real bites are missed.
+    bobber_score_drop: float = 0.35
+    #   bobber_pos_shift: Manhattan pixel distance from the cast-time bobber
+    #     home position at which we call a strike. Rain doesn't move the
+    #     bobber; a bite does. 6 px is usually enough.
+    bobber_pos_shift: int = 6
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -106,6 +119,8 @@ class Config:
             red_trail_min=float(d.get("red_trail_min", 0.005)),
             splash_min=float(d.get("splash_min", 0.02)),
             strike_edge_min=float(d.get("strike_edge_min", 25.0)),
+            bobber_score_drop=float(d.get("bobber_score_drop", 0.35)),
+            bobber_pos_shift=int(d.get("bobber_pos_shift", 6)),
         )
 
 
