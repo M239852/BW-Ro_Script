@@ -23,7 +23,7 @@ python main.py --calibrate
 A translucent overlay appears. You'll be asked, in order, to drag a box over:
 
 1. **Letter region** — tight rectangle where the minigame letter (A–Z) shows up.
-2. **Bobber region** — small box around where your bobber floats in the water.
+2. **Bobber region** — box around where your bobber floats. **Make this generously wide**: the strike detector looks for the red/orange ripple trail the approaching fish paints across the water, so the region should cover a few bobber-widths of water *around* the bobber (not just the bobber itself). If the region is too tight the trail never enters it and the bite is only detected once the bobber goes fully under — which is usually too late.
 3. **Progress region** — the minigame progress / meter bar.
 4. **Cast point** — click where to click-cast (or type `n` to use a cast key instead).
 
@@ -103,6 +103,8 @@ Everything is in `config.json`:
 | key | meaning | default |
 |---|---|---|
 | `sink_threshold` | mean pixel delta on bobber region to call "sink" | `18.0` |
+| `red_trail_min` | fraction of red/orange pixels in the bobber region at which we call a strike. The approaching fish paints a red/orange dotted ripple line across the water; this catches the bite *before* the bobber goes under. `0.005` = 0.5% of pixels. Lower if bites are missed, raise if false-triggers. | `0.005` |
+| `strike_edge_min` | Laplacian-variance increase over the quiet-water baseline at which we call a strike. The splash / smoke ring adds structural edges that weren't there when the water was calm. | `25.0` |
 | `bobber_edge_min` | Laplacian edge variance below which "no bobber visible" (empty water) | `8.0` |
 | `max_recast_attempts` | consecutive cast misses before a longer RECOVER pause | `4` |
 | `win_fill` | green fraction of progress bar meaning "win" | `0.90` |
@@ -133,9 +135,17 @@ It fires cast → wait 3 s → retrieve three times with no sink detection. Watc
 
 **Tuning with `--debug`.** In debug mode the bot prints:
 - `bobber edge var=XX.X` right after each cast — if this is consistently below `bobber_edge_min` even when a bobber is visible, lower `bobber_edge_min` to match.
-- A heartbeat every ~3s during `WAITING_SINK` showing the live `delta`/`vdrop` values. If you see a real sink happen but `delta` never crosses `sink_threshold`, lower it. If it false-triggers, raise it.
+- A heartbeat every ~3s during `WAITING_SINK` showing the live strike signals:
+  ```
+  [bot] waiting sink  t= 5.2s  delta= 12.4/18.0  vdrop= 4.1  red= 0.8%/0.5%  edgeD=  41.2/25.0  hits=1
+  ```
+  - `delta` — mean pixel change vs baseline (old sink signal).
+  - `vdrop` — HSV Value drop (old sink signal).
+  - `red` — fraction of red/orange trail pixels in the region vs `red_trail_min`. **This is the primary bite signal** — the approaching fish's ripple trail.
+  - `edgeD` — Laplacian-variance increase over baseline vs `strike_edge_min`. Catches the splash/smoke ring when the fish strikes.
+- A `STRIKE` line tells you which signal fired. If you watched a real bite happen but none of the four values crossed its threshold, lower the one that got closest. If the bot false-triggers in calm water, raise the one that crossed.
 
-If the bot casts but nothing happens, the issue is almost always `bobber_edge_min` or `sink_threshold`; watch one full cycle with `--debug` and adjust.
+If strikes are being missed: first check that `bobber_region` is wide enough to contain the approaching trail (see the calibration note above), then lower `red_trail_min` to e.g. `0.003` or `strike_edge_min` to `15.0`.
 
 ## File layout
 

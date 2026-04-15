@@ -52,6 +52,15 @@ class Config:
     # Window title substring to force-focus before sending cast/retrieve
     # clicks. Set to "" or null to disable.
     focus_window_title: Optional[str] = "Roblox"
+    # Fraction of pixels in bobber_region that must match the red/orange
+    # fish-approach trail color before we call a strike. Very small because
+    # the trail is sparse dots on mostly-dark water — 0.005 (0.5%) is a
+    # reasonable starting point.
+    red_trail_min: float = 0.005
+    # Laplacian-variance increase over the cast-time baseline at which we
+    # call a strike (splash / smoke ring adds structural edges that weren't
+    # there when the water was quiet). Start loose; raise if false-triggers.
+    strike_edge_min: float = 25.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -87,6 +96,8 @@ class Config:
             retrieve_delay_ms=int(d.get("retrieve_delay_ms", 350)),
             click_hold_ms=int(d.get("click_hold_ms", 50)),
             focus_window_title=d.get("focus_window_title", "Roblox"),
+            red_trail_min=float(d.get("red_trail_min", 0.005)),
+            strike_edge_min=float(d.get("strike_edge_min", 25.0)),
         )
 
 

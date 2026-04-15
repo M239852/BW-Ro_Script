@@ -80,6 +80,37 @@ def bobber_edge_variance(img: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def red_trail_fraction(img: np.ndarray) -> float:
+    """Fraction of pixels that look like the fish-approach red/orange trail.
+
+    In Bridger Western the approaching fish paints a red/orange dotted ripple
+    line across the dark water as it closes on the bobber, and leaves a
+    smoke/splash ring right at the bobber when it strikes. Both have strong
+    warm-hue saturation against the dark-teal water baseline (which has almost
+    no red), so a straight HSV red/orange mask is a very clean bite signal.
+    """
+    if img.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    H = hsv[:, :, 0]
+    S = hsv[:, :, 1]
+    V = hsv[:, :, 2]
+    # Red wraps around 0/180 in OpenCV HSV; include orange too (H ~10-25).
+    warm = (((H <= 18) | (H >= 165)) & (S >= 90) & (V >= 70))
+    return float(warm.sum()) / float(warm.size)
+
+
+def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
+    """Structural-feature increase in curr vs baseline. Positive values mean
+    new edges have appeared in the region — e.g. a splash ring, smoke effect,
+    or red ripple trail over quiet water. This is robust to overall brightness
+    changes (unlike frame_delta) because it only measures high-frequency
+    structure, not mean pixel value."""
+    if baseline.size == 0 or curr.size == 0:
+        return 0.0
+    return bobber_edge_variance(curr) - bobber_edge_variance(baseline)
+
+
 # --- progress bar ----------------------------------------------------------
 
 ProgressState = Literal["filling", "win", "fail", "unknown"]

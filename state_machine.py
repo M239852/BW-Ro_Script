@@ -228,30 +228,52 @@ class FishingBot:
 
         delta = vision.frame_delta(self._baseline_bobber, curr)
         vdrop = vision.value_drop(self._baseline_bobber, curr)
+        # Strike signals: the fish leaves a red/orange ripple trail as it
+        # closes on the bobber, and a splash/smoke ring appears right at the
+        # bobber when it hits. Either is a cleaner bite signal than raw
+        # brightness delta on dark water.
+        red_frac = vision.red_trail_fraction(curr)
+        edge_delta = vision.edge_variance_delta(self._baseline_bobber, curr)
 
         # Heartbeat log — lets the user see the bot is alive and what values it
-        # is seeing, which is critical for tuning sink_threshold.
+        # is seeing, which is critical for tuning the strike thresholds.
         now = time.perf_counter()
         if self.debug and now - self._last_heartbeat >= HEARTBEAT_S:
             self._last_heartbeat = now
             print(
                 f"[bot] waiting sink  t={self._elapsed():4.1f}s  "
-                f"delta={delta:5.1f} (thr {self.cfg.sink_threshold:.1f})  "
-                f"vdrop={vdrop:5.1f}  hits={self._sink_hits}"
+                f"delta={delta:5.1f}/{self.cfg.sink_threshold:.1f}  "
+                f"vdrop={vdrop:5.1f}  "
+                f"red={red_frac*100:4.1f}%/{self.cfg.red_trail_min*100:.1f}%  "
+                f"edgeD={edge_delta:6.1f}/{self.cfg.strike_edge_min:.1f}  "
+                f"hits={self._sink_hits}"
             )
 
         since_cast = now - self._cast_t
         if since_cast < CAST_LOCKOUT_S:
             return
 
-        if delta > self.cfg.sink_threshold or vdrop > 12:
+        # A bite is confirmed when ANY of these signals cross their threshold:
+        #   - darkness/delta check (bobber yanked underwater)
+        #   - red/orange ripple trail visible in the region (fish approaching)
+        #   - splash/smoke ring has added structural edges over quiet baseline
+        strike_hit = (
+            delta > self.cfg.sink_threshold
+            or vdrop > 12
+            or red_frac >= self.cfg.red_trail_min
+            or edge_delta >= self.cfg.strike_edge_min
+        )
+        if strike_hit:
             self._sink_hits += 1
         else:
             self._sink_hits = max(0, self._sink_hits - 1)
 
         if self._sink_hits >= 2:
             if self.debug:
-                print(f"[bot] SINK delta={delta:.1f} vdrop={vdrop:.1f}")
+                print(
+                    f"[bot] STRIKE delta={delta:.1f} vdrop={vdrop:.1f} "
+                    f"red={red_frac*100:.1f}% edgeD={edge_delta:.1f}"
+                )
             self._enter(State.RETRIEVING)
 
     # -- RETRIEVING
