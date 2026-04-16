@@ -121,25 +121,60 @@ def edge_variance_delta(baseline: np.ndarray, curr: np.ndarray) -> float:
     return bobber_edge_variance(curr) - bobber_edge_variance(baseline)
 
 
-def extract_bobber_template(baseline: np.ndarray) -> Optional[np.ndarray]:
-    """Cut a small window from the center of the bobber_region baseline to
-    use as a tracking template. The region is assumed to be calibrated so
-    that the bobber sits roughly in the middle — we take a 40%-sized central
-    crop, which is almost guaranteed to contain the bobber and little else.
+def find_bobber_in_baseline(baseline: np.ndarray) -> Optional[tuple[int, int, int]]:
+    """Locate the bobber inside the baseline by edge density.
 
-    Returns a grayscale template, or None if the baseline is unusable.
+    The bobber has a sharp silhouette against water — its pixels produce
+    strong Laplacian responses. Open water gives near-zero response. We
+    box-filter the edge magnitude to find the small window with the
+    highest concentration of edges; that window is centered on the bobber.
+
+    Returns (x, y, side) of a square window inside the baseline, or None
+    if the baseline is unusable. (x, y) is the top-left in baseline coords.
     """
     if baseline is None or baseline.size == 0:
         return None
     gray = cv2.cvtColor(baseline, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-    if h < 8 or w < 8:
+    if h < 12 or w < 12:
         return None
-    ch = max(6, int(h * 0.4))
-    cw = max(6, int(w * 0.4))
-    y0 = (h - ch) // 2
-    x0 = (w - cw) // 2
-    return gray[y0:y0 + ch, x0:x0 + cw].copy()
+    lap = cv2.Laplacian(gray, cv2.CV_64F)
+    edge_strength = np.abs(lap).astype(np.float32)
+    # Template size: ~30% of the smaller region dimension. Small enough
+    # to be mostly bobber (so water doesn't match it), large enough to
+    # have distinctive structure that doesn't randomly match noise.
+    side = max(12, int(min(h, w) * 0.30))
+    side = min(side, h, w)
+    density = cv2.boxFilter(edge_strength, -1, (side, side))
+    # boxFilter centers the kernel on each pixel; max_loc is the peak
+    # CENTER, not the top-left of the densest window. Convert.
+    _, _, _, peak_center = cv2.minMaxLoc(density)
+    cx, cy = peak_center
+    x0 = max(0, min(cx - side // 2, w - side))
+    y0 = max(0, min(cy - side // 2, h - side))
+    return (x0, y0, side)
+
+
+def extract_bobber_template(baseline: np.ndarray) -> Optional[np.ndarray]:
+    """Find the bobber inside the baseline and cut a tight grayscale
+    template around it. See find_bobber_in_baseline for the detection
+    method.
+
+    The previous implementation took a blind 40% central crop, which on
+    a wide bobber_region (recommended in the README to catch the ripple
+    trail) frequently captured mostly water with a sliver of bobber. A
+    water-heavy template matches water everywhere in the region, so the
+    score stays decent even when the bobber dips — no real strike signal.
+    A bobber-heavy template, by contrast, has no good match anywhere in
+    plain water, so the score craters to <0.3 the moment the bobber
+    disappears. That's the signal we want.
+    """
+    bbox = find_bobber_in_baseline(baseline)
+    if bbox is None:
+        return None
+    x0, y0, side = bbox
+    gray = cv2.cvtColor(baseline, cv2.COLOR_BGR2GRAY)
+    return gray[y0:y0 + side, x0:x0 + side].copy()
 
 
 def track_bobber(
@@ -350,6 +385,32 @@ def _selftest() -> None:
     cv2.putText(canvas, "A", (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 4)
     processed = _preprocess_letter(canvas)
     assert processed is not None and processed.shape == (TEMPLATE_SIZE, TEMPLATE_SIZE)
+
+    # Bobber template extraction: simulated 100x150 bobber_region with a
+    # high-contrast "bobber" patch off-center, surrounded by low-contrast
+    # noisy "water". Detector should locate the bobber, not the center.
+    rng = np.random.default_rng(0)
+    sim = (rng.normal(loc=80, scale=4, size=(100, 150, 3))
+           .clip(0, 255).astype(np.uint8))
+    # Plant a bright disc at (x=110, y=30) — far from center (75, 50)
+    cv2.circle(sim, (110, 30), 8, (240, 240, 240), -1)
+    cv2.circle(sim, (110, 30), 8, (10, 10, 10), 2)
+    bbox = find_bobber_in_baseline(sim)
+    assert bbox is not None
+    bx, by, bs = bbox
+    cx, cy = bx + bs // 2, by + bs // 2
+    # Center of detected box should be near the planted bobber.
+    dx, dy = abs(cx - 110), abs(cy - 30)
+    assert dx + dy <= bs, (
+        f"detected bobber at ({cx},{cy}) but planted at (110,30); "
+        f"box side={bs}, dx={dx}, dy={dy}"
+    )
+    # Template should NOT be a centered crop of the original.
+    central_x = 150 // 2
+    central_y = 100 // 2
+    assert abs(cx - central_x) > 10 or abs(cy - central_y) > 10, (
+        "extractor returned a near-centered crop instead of finding the bobber"
+    )
 
     print("vision self-test: OK")
 

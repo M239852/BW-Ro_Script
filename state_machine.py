@@ -351,6 +351,33 @@ class FishingBot:
         #      is unreliable — disable the template path entirely for this
         #      cast and fall through to the delta-based fallback detector.
         self._bobber_template = vision.extract_bobber_template(self._baseline_bobber)
+        # Dump the detected bobber location + template so the user can verify
+        # by eye that we're actually tracking the bobber and not a patch of
+        # water. This is the single most useful debug artifact for tuning —
+        # if the marked box on debug/templates/baseline_*.png isn't sitting
+        # on the bobber, the detector cannot work no matter how the
+        # thresholds are tuned.
+        if self.debug and self._bobber_template is not None:
+            try:
+                bbox = vision.find_bobber_in_baseline(self._baseline_bobber)
+                Path("debug/templates").mkdir(parents=True, exist_ok=True)
+                ts = int(time.time() * 1000)
+                cv2.imwrite(
+                    f"debug/templates/template_{ts}.png", self._bobber_template
+                )
+                if bbox is not None:
+                    bx, by, bs = bbox
+                    marked = self._baseline_bobber.copy()
+                    cv2.rectangle(
+                        marked, (bx, by), (bx + bs, by + bs), (0, 255, 0), 2
+                    )
+                    cv2.imwrite(f"debug/templates/baseline_{ts}.png", marked)
+                    print(
+                        f"[bot] detected bobber at ({bx}, {by}) size={bs}px "
+                        f"(baseline_{ts}.png shows the green box)"
+                    )
+            except Exception as e:
+                print(f"[bot] template dump failed: {e}")
         if self._bobber_template is not None:
             live_scores: list[float] = []
             live_locs: list[tuple[int, int]] = []
